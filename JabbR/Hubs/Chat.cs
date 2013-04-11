@@ -2,9 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
-using System.Web;
 using JabbR.Commands;
 using JabbR.ContentProviders.Core;
 using JabbR.Infrastructure;
@@ -12,25 +10,23 @@ using JabbR.Models;
 using JabbR.Services;
 using JabbR.ViewModels;
 using Microsoft.AspNet.SignalR;
-using Microsoft.AspNet.SignalR.Hubs;
 using Newtonsoft.Json;
 
 namespace JabbR
 {
+    [Authorize]
     public class Chat : Hub, INotificationService
     {
         private readonly IJabbrRepository _repository;
         private readonly IChatService _service;
         private readonly ICache _cache;
         private readonly IResourceProcessor _resourceProcessor;
-        private readonly IApplicationSettings _settings;
 
         private static readonly Version _version = typeof(Chat).Assembly.GetName().Version;
         private static readonly string _versionString = _version.ToString();
 
-        public Chat(IApplicationSettings settings, IResourceProcessor resourceProcessor, IChatService service, IJabbrRepository repository, ICache cache)
+        public Chat(IResourceProcessor resourceProcessor, IChatService service, IJabbrRepository repository, ICache cache)
         {
-            _settings = settings;
             _resourceProcessor = resourceProcessor;
             _service = service;
             _repository = repository;
@@ -59,36 +55,23 @@ namespace JabbR
             }
         }
 
-        public bool Join()
+        public void Join()
         {
             SetVersion();
 
             // Get the client state
-            ClientState clientState = GetClientState();
+            var userId = Context.User.Identity.Name;
 
             // Try to get the user from the client state
-            ChatUser user = _repository.GetUserById(clientState.UserId);
-
-            // Threre's no user being tracked
-            if (user == null)
-            {
-                return false;
-            }
-
-            // Migrate all users to use new auth
-            if (!String.IsNullOrEmpty(_settings.AuthApiKey) &&
-                String.IsNullOrEmpty(user.Identity))
-            {
-                return false;
-            }
+            ChatUser user = _repository.GetUserById(userId);
 
             // Update some user values
             _service.UpdateActivity(user, Context.ConnectionId, UserAgent);
             _repository.CommitChanges();
 
-            OnUserInitialize(clientState, user);
+            ClientState clientState = GetClientState();
 
-            return true;
+            OnUserInitialize(clientState, user);
         }
 
         private void SetVersion()
@@ -136,18 +119,15 @@ namespace JabbR
 
             SetVersion();
 
-            // Sanitize the content (strip and bad html out)
-            message.Content = HttpUtility.HtmlEncode(message.Content);
-
             // See if this is a valid command (starts with /)
             if (TryHandleCommand(message.Content, message.Room))
             {
                 return outOfSync;
             }
 
-            string id = GetUserId();
+            var userId = Context.User.Identity.Name;
 
-            ChatUser user = _repository.VerifyUserId(id);
+            ChatUser user = _repository.VerifyUserId(userId);
             ChatRoom room = _repository.VerifyUserRoom(_cache, user, message.Room);
 
             // REVIEW: Is it better to use _repository.VerifyRoom(message.Room, mustBeOpen: false)
@@ -160,11 +140,7 @@ namespace JabbR
             // Update activity *after* ensuring the user, this forces them to be active
             UpdateActivity(user, room);
 
-
-            HashSet<string> links;
-            var messageText = ParseChatMessageText(message.Content, out links);
-
-            ChatMessage chatMessage = _service.AddMessage(user, room, message.Id, messageText);
+            ChatMessage chatMessage = _service.AddMessage(user, room, message.Id, message.Content);
 
 
             var messageViewModel = new MessageViewModel(chatMessage);
@@ -178,42 +154,29 @@ namespace JabbR
             chatMessage.Id = Guid.NewGuid().ToString("d");
             _repository.CommitChanges();
 
-            if (!links.Any())
+            var urls = UrlExtractor.ExtractUrls(chatMessage.Content);
+            if (urls.Count > 0)
             {
-                return outOfSync;
+                ProcessUrls(urls, room.Name, clientMessageId, message.Id);
             }
-
-            ProcessUrls(links, room.Name, clientMessageId, chatMessage.Id);
 
             return outOfSync;
         }
 
-        private string ParseChatMessageText(string content, out HashSet<string> links)
-        {
-            var textTransform = new TextTransform(_repository);
-            string message = textTransform.Parse(content);
-            return TextTransform.TransformAndExtractUrls(message, out links);
-        }
-
         public UserViewModel GetUserInfo()
         {
-            string id = GetUserId();
+            var userId = Context.User.Identity.Name;
 
-            ChatUser user = _repository.VerifyUserId(id);
+            ChatUser user = _repository.VerifyUserId(userId);
 
             return new UserViewModel(user);
         }
 
         public override Task OnReconnected()
         {
-            string id = GetUserId();
+            var userId = Context.User.Identity.Name;
 
-            if (String.IsNullOrEmpty(id))
-            {
-                return null;
-            }
-
-            ChatUser user = _repository.VerifyUserId(id);
+            ChatUser user = _repository.VerifyUserId(userId);
 
             // Make sure this client is being tracked
             _service.AddClient(user, Context.ConnectionId, UserAgent);
@@ -268,8 +231,8 @@ namespace JabbR
 
         public IEnumerable<LobbyRoomViewModel> GetRooms()
         {
-            string id = GetUserId();
-            ChatUser user = _repository.VerifyUserId(id);
+            string userId = Context.User.Identity.Name;
+            ChatUser user = _repository.VerifyUserId(userId);
 
             var rooms = _repository.GetAllowedRooms(user).Select(r => new LobbyRoomViewModel
             {
@@ -326,37 +289,17 @@ namespace JabbR
                 Owners = from u in room.Owners.Online()
                          select u.Name,
                 RecentMessages = recentMessages.Select(m => new MessageViewModel(m)),
-                Topic = ConvertUrlsAndRoomLinks(room.Topic ?? ""),
-                Welcome = ConvertUrlsAndRoomLinks(room.Welcome ?? ""),
+                Topic = room.Topic ?? "",
+                Welcome = room.Welcome ?? "",
                 Closed = room.Closed
             };
         }
 
-        private string ConvertUrlsAndRoomLinks(string message)
-        {
-            TextTransform textTransform = new TextTransform(_repository);
-            message = textTransform.ConvertHashtagsToRoomLinks(message);
-            HashSet<string> urls;
-            return TextTransform.TransformAndExtractUrls(message, out urls);
-        }
-
-        // TODO: Deprecate
-        public void Typing()
-        {
-            string roomName = Clients.Caller.activeRoom;
-
-            Typing(roomName);
-        }
-
         public void Typing(string roomName)
         {
-            string id = GetUserId();
-            ChatUser user = _repository.GetUserById(id);
+            string userId = Context.User.Identity.Name;
 
-            if (user == null)
-            {
-                return;
-            }
+            ChatUser user = _repository.GetUserById(userId);
 
             ChatRoom room = _repository.VerifyUserRoom(_cache, user, roomName);
 
@@ -433,13 +376,8 @@ namespace JabbR
                         continue;
                     }
 
-                    // Try to get content from each url we're resolved in the query
-                    string extractedContent = "<p>" + task.Result.Content + "</p>";
-
                     // Notify the room
-                    Clients.Group(roomName).addMessageContent(clientMessageId, extractedContent, roomName);
-
-                    _service.AppendMessage(messageId, extractedContent);
+                    Clients.Group(roomName).addMessageContent(clientMessageId, task.Result.Content, roomName);
                 }
             });
         }
@@ -447,7 +385,7 @@ namespace JabbR
         private bool TryHandleCommand(string command, string room)
         {
             string clientId = Context.ConnectionId;
-            string userId = GetUserId();
+            string userId = Context.User.Identity.Name;
 
             var commandManager = new CommandManager(clientId, UserAgent, userId, room, _service, _repository, _cache, this);
             return commandManager.TryHandleCommand(command);
@@ -478,7 +416,7 @@ namespace JabbR
                 {
                     var userViewModel = new UserViewModel(user);
 
-                    Clients.Group(room.Name).leave(userViewModel, room.Name);
+                    Clients.OthersInGroup(room.Name).leave(userViewModel, room.Name);
                 }
             }
         }
@@ -550,7 +488,7 @@ namespace JabbR
             {
                 Name = room.Name,
                 Private = room.Private,
-                Welcome = ConvertUrlsAndRoomLinks(room.Welcome ?? ""),
+                Welcome = room.Welcome ?? "",
                 Closed = room.Closed
             };
 
@@ -692,7 +630,8 @@ namespace JabbR
 
         void INotificationService.ListRooms(ChatUser user)
         {
-            string userId = GetUserId();
+            string userId = Context.User.Identity.Name;
+
             var userModel = new UserViewModel(user);
 
             Clients.Caller.showUsersRoomList(userModel, user.Rooms.Allowed(userId).Select(r => r.Name));
@@ -754,16 +693,16 @@ namespace JabbR
 
         void INotificationService.LogOut(ChatUser user, string clientId)
         {
-            DisconnectClient(clientId);
-
-            var rooms = user.Rooms.Select(r => r.Name);
-
-            Clients.Caller.logOut(rooms);
+            foreach (var client in user.ConnectedClients)
+            {
+                DisconnectClient(client.Id);
+                Clients.Client(client.Id).logOut();
+            }
         }
 
         void INotificationService.ShowUserInfo(ChatUser user)
         {
-            string userId = GetUserId();
+            string userId = Context.User.Identity.Name;
 
             Clients.Caller.showUserInfo(new
             {
@@ -789,19 +728,16 @@ namespace JabbR
 
         void INotificationService.Invite(ChatUser user, ChatUser targetUser, ChatRoom targetRoom)
         {
-            var transform = new TextTransform(_repository);
-            string roomLink = transform.ConvertHashtagsToRoomLinks("#" + targetRoom.Name);
-
             // Send the invite message to the sendee
             foreach (var client in targetUser.ConnectedClients)
             {
-                Clients.Client(client.Id).sendInvite(user.Name, targetUser.Name, roomLink);
+                Clients.Client(client.Id).sendInvite(user.Name, targetUser.Name, targetRoom.Name);
             }
 
             // Send the invite notification to the sender
             foreach (var client in user.ConnectedClients)
             {
-                Clients.Client(client.Id).sendInvite(user.Name, targetUser.Name, roomLink);
+                Clients.Client(client.Id).sendInvite(user.Name, targetUser.Name, targetRoom.Name);
             }
         }
 
@@ -890,7 +826,7 @@ namespace JabbR
         void INotificationService.ChangeTopic(ChatUser user, ChatRoom room)
         {
             bool isTopicCleared = String.IsNullOrWhiteSpace(room.Topic);
-            var parsedTopic = ConvertUrlsAndRoomLinks(room.Topic ?? "");
+            var parsedTopic = room.Topic ?? "";
             Clients.Group(room.Name).topicChanged(room.Name, isTopicCleared, parsedTopic, user.Name);
             // Create the view model
             var roomViewModel = new RoomViewModel
@@ -905,7 +841,7 @@ namespace JabbR
         void INotificationService.ChangeWelcome(ChatUser user, ChatRoom room)
         {
             bool isWelcomeCleared = String.IsNullOrWhiteSpace(room.Welcome);
-            var parsedWelcome = ConvertUrlsAndRoomLinks(room.Welcome ?? "");
+            var parsedWelcome = room.Welcome ?? "";
             foreach (var client in user.ConnectedClients)
             {
                 Clients.Client(client.Id).welcomeChanged(isWelcomeCleared, parsedWelcome);
@@ -979,12 +915,6 @@ namespace JabbR
             Clients.All.updateRoomCount(roomViewModel, _repository.GetOnlineUsers(room).Count());
         }
 
-        private string GetUserId()
-        {
-            ClientState state = GetClientState();
-            return state.UserId;
-        }
-
         private ClientState GetClientState()
         {
             // New client state
@@ -1001,9 +931,6 @@ namespace JabbR
                 clientState = JsonConvert.DeserializeObject<ClientState>(jabbrState);
             }
 
-            // Read the id from the caller if there's no cookie
-            clientState.UserId = clientState.UserId ?? Clients.Caller.id;
-
             return clientState;
         }
 
@@ -1012,7 +939,7 @@ namespace JabbR
             Cookie cookie;
             Context.RequestCookies.TryGetValue(key, out cookie);
             string value = cookie != null ? cookie.Value : null;
-            return value != null ? HttpUtility.UrlDecode(value) : null;
+            return value != null ? Uri.UnescapeDataString(value) : null;
         }
 
         void INotificationService.BanUser(ChatUser targetUser)

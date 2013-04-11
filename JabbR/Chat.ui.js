@@ -2,7 +2,7 @@
 /// <reference path="Scripts/jQuery.tmpl.js" />
 /// <reference path="Scripts/jquery.cookie.js" />
 /// <reference path="Chat.toast.js" />
-/*global Emoji:true, janrain:true */
+/*global Emoji:true*/
 (function ($, window, document, utility) {
     "use strict";
 
@@ -16,6 +16,7 @@
         $downloadDialog = null,
         $downloadDialogButton = null,
         $downloadRange = null,
+        $logout = null,
         $help = null,
         $ui = null,
         $sound = null,
@@ -45,7 +46,8 @@
         $closedRoomFilter = null,
         updateTimeout = 15000,
         $richness = null,
-        lastPrivate = null;
+        lastPrivate = null,
+        roomCache = {};
 
     function getRoomId(roomName) {
         return window.escape(roomName.toLowerCase()).replace(/[^a-z0-9]/, '_');
@@ -412,6 +414,12 @@
         return getRoomElements('Lobby');
     }
 
+    function getRoomsNames() {
+        var lobby = getLobby();
+        return lobby.users.find('li')
+                     .map(function () { return $(this).data('name') + ' '; });
+    }
+
     function updateLobbyRoomCount(room, count) {
         var lobby = getLobby(),
             $room = lobby.users.find('[data-room="' + room.Name + '"]'),
@@ -455,6 +463,8 @@
             name: roomName,
             closed: roomViewModel.Closed
         };
+
+        roomCache[roomName.toLowerCase()] = true;
 
         templates.tab.tmpl(viewModel).data('name', roomName).appendTo($tabs);
 
@@ -571,7 +581,6 @@
         var isFromCollapibleContentProvider = isFromCollapsibleContentProvider(message.message),
             collapseContent = shouldCollapseContent(message.message, roomName);
 
-        message.message = isFromCollapibleContentProvider ? message.message : utility.parseEmojis(message.message);
         message.trimmedName = utility.trim(message.name, 21);
         message.when = message.date.formatTime(true);
         message.fulldate = message.date.toLocaleString();
@@ -738,7 +747,7 @@
     function updateRoomTopic(roomViewModel) {
         var room = getRoomElements(roomViewModel.Name);
         var topic = roomViewModel.Topic;
-        var topicHtml = topic === '' ? 'You\'re chatting in ' + roomViewModel.Name : '<strong>Topic: </strong>' + topic;
+        var topicHtml = topic === '' ? 'You\'re chatting in ' + roomViewModel.Name : '<strong>Topic: </strong>' + ui.processContent(topic);
         var roomTopic = room.roomTopic;
         var isVisibleRoom = getCurrentRoomElements().getName() === roomViewModel.Name;
         if (isVisibleRoom) {
@@ -790,7 +799,8 @@
             sendMessage: 'jabbr.ui.sendMessage',
             focusit: 'jabbr.ui.focusit',
             blurit: 'jabbr.ui.blurit',
-            preferencesChanged: 'jabbr.ui.preferencesChanged'
+            preferencesChanged: 'jabbr.ui.preferencesChanged',
+            loggedOut: 'jabbr.ui.loggedOut'
         },
 
         help: {
@@ -814,6 +824,7 @@
             $downloadDialog = $('#download-dialog');
             $downloadDialogButton = $('#download-dialog-button');
             $downloadRange = $('#download-range');
+            $logout = $('#preferences .logout');
             $help = $('#preferences .help');
             $disconnectDialog = $('#disconnect-dialog');
             $login = $('#jabbr-login');
@@ -836,7 +847,8 @@
                 separator: $('#message-separator-template'),
                 tab: $('#new-tab-template'),
                 gravatarprofile: $('#gravatar-profile-template'),
-                commandhelp: $('#command-help-template')
+                commandhelp: $('#command-help-template'),
+                multiline: $('#multiline-content-template')
             };
 
             if (toast.canToast()) {
@@ -954,7 +966,7 @@
                 }
 
                 // Prepend our target username
-                message = '/msg ' + $(this).text().trim() + ' ' + message;
+                message = '@' + $(this).text().trim() + ' ' + message;
                 ui.setMessage(message);
                 return false;
             };
@@ -1076,9 +1088,15 @@
 
                 $downloadDialog.modal('hide');
             });
+
+            $logout.click(function () {
+                $ui.trigger(ui.events.loggedOut);
+            });
+
             $help.click(function () {
                 ui.showHelp();
             });
+
             $closedRoomFilter.click(function () {
                 var room = getCurrentRoomElements(),
                     show = $(this).is(':checked');
@@ -1167,9 +1185,7 @@
                                          .not('.room')
                                          .map(function () { return ($(this).data('name') + ' ' || "").toString(); });
                         case '#':
-                            var lobby = getLobby();
-                            return lobby.users.find('li')
-                                         .map(function () { return $(this).data('name') + ' '; });
+                            return getRoomsNames();
 
                         case '/':
                             var commands = ui.getCommands();
@@ -1399,6 +1415,8 @@
                         $li.hide();
                     }
                 }
+
+                roomCache[this.Name.toLowerCase()] = true;
             });
 
             if (lobby.isActive()) {
@@ -1699,8 +1717,8 @@
                 content = collapseRichContent(content);
             }
 
-            $message.find('.middle')
-                    .append(content);
+            $(content).appendTo($message.find('.middle'))
+                      .wrap('<p/>');
         },
         addPrivateMessage: function (content, type) {
             var rooms = getAllRoomElements();
@@ -1713,7 +1731,7 @@
         prepareNotificationMessage: function (content, type) {
             var now = new Date(),
                 message = {
-                    message: utility.parseEmojis(content),
+                    message: ui.processContent(content),
                     type: type,
                     date: now,
                     when: now.formatTime(true),
@@ -1851,20 +1869,8 @@
             return ui.name;
         },
         showLogin: function () {
-            if (typeof (janrain) !== 'undefined') {
-                if (janrain.ready === false) {
-                    window.setTimeout(function () {
-                        $login.modal({ backdrop: true, keyboard: true });
-                    }, 1000);
-                }
-                else {
-                    $login.modal({ backdrop: true, keyboard: true });
-                }
-
-                return true;
-            }
-
-            return false;
+            $login.modal({ backdrop: true, keyboard: true });
+            return true;
         },
         showDisconnectUI: function () {
             $disconnectDialog.modal();
@@ -1988,6 +1994,43 @@
         setRoomListStatuses: function (roomName) {
             var room = roomName ? getRoomElements(roomName) : getCurrentRoomElements();
             room.setListState(room.owners);
+        },
+        processContent: function (content) {
+            var hasNewline = content.indexOf('\n') != -1;
+            
+            if (hasNewline) {
+                // Multiline detection
+                return templates.multiline.tmpl({ content: content }).html();
+            }
+            else {
+                // Emoji
+                content = utility.parseEmojis(content);
+
+                // Html encode
+                content = utility.encodeHtml(content);
+
+                // Transform emoji to html
+                content = utility.transformEmojis(content);
+
+                // Create rooms links
+                content = content.replace(/#([A-Za-z0-9-_]{1,30}\w*)/g, function (m) {
+                    var roomName = m.substr(1);
+
+                    if (roomCache[roomName.toLowerCase()]) {
+                        return '<a href="#/rooms/' + roomName + '" title="' + roomName + '">' + m + '</a>';
+                    }
+                    return m;
+                });
+
+                // Convert normal links
+                content = linkify(content, {
+                    callback: function (text, href) {
+                        return href ? '<a rel="nofollow external" target="_blank" href="' + href + '" title="' + href + '">' + text + '</a>' : text;
+                    }
+                });
+
+                return content;
+            }
         }
     };
 

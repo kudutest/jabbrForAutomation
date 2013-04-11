@@ -50,6 +50,25 @@
         return (user.Flag) ? 'flag flag-' + user.Flag : '';
     }
 
+    function performLogout() {
+        var d = $.Deferred();
+        $.post('account/logout', {}).done(function () {
+            d.resolveWith(null);
+            document.location = document.location.pathname;
+        });
+
+        return d.promise();
+    }
+
+    function logout() {
+        performLogout().done(function () {
+            chat.server.send('/logout', chat.state.activeRoom)
+                .fail(function (e) {
+                    ui.addMessage(e, 'error', chat.state.activeRoom);
+                });
+        });
+    }
+
     function populateRoom(room) {
         var d = $.Deferred();
         // Populate the list of users rooms and messages 
@@ -135,7 +154,7 @@
         return {
             name: message.User.Name,
             hash: message.User.Hash,
-            message: message.Content,
+            message: message.HtmlEncoded ? message.Content : ui.processContent(message.Content),
             id: message.Id,
             date: message.When.fromJsonDate(),
             highlight: re.test(message.Content) ? 'highlight' : '',
@@ -146,7 +165,6 @@
     // Save some state in a cookie
     function updateCookie() {
         var state = {
-            userId: chat.state.id,
             activeRoom: chat.state.activeRoom,
             preferences: ui.getState()
         },
@@ -160,7 +178,7 @@
             document.title = originalTitle;
         }
         else {
-            document.title =  (isUnreadMessageForUser ? '*' : '') + '(' + unread + ') ' + originalTitle;
+            document.title = (isUnreadMessageForUser ? '*' : '') + '(' + unread + ') ' + originalTitle;
         }
     }
 
@@ -213,7 +231,6 @@
                         populateRoom(room.Name);
                     }
                 });
-                populateLobbyRooms();
             };
 
         $.each(rooms, function (index, room) {
@@ -246,6 +263,10 @@
             // There's no active room so we don't care
             loadRooms();
         }
+    };
+
+    chat.client.logOut = function () {
+        performLogout();
     };
 
     chat.client.lockRoom = function (user, room) {
@@ -426,26 +447,6 @@
         updateCookie();
     };
 
-    chat.client.logOut = function (rooms) {
-        ui.setActiveRoom('Lobby');
-
-        // Close all rooms
-        $.each(rooms, function () {
-            ui.removeRoom(this);
-        });
-
-        ui.addMessage("You've been logged out.", 'notification', this.state.activeRoom);
-
-        chat.state.activeRoom = undefined;
-        chat.state.name = undefined;
-        chat.state.id = undefined;
-
-        updateCookie();
-
-        // Reload the page
-        document.location = document.location.pathname;
-    };
-
     chat.client.forceUpdate = function () {
         ui.showUpdateUI();
     };
@@ -569,7 +570,7 @@
     };
 
     chat.client.sendMeMessage = function (name, message, room) {
-        ui.addMessage('*' + name + ' ' + message, 'notification', room);
+        ui.addMessage('*' + name + ' ' + message, 'action', room);
     };
 
     chat.client.sendPrivateMessage = function (from, to, message) {
@@ -579,16 +580,16 @@
             ui.setLastPrivate(from);
         }
 
-        ui.addPrivateMessage('<emp>*' + from + '* &raquo; *' + to + '*</emp> ' + message, 'pm');
+        ui.addPrivateMessage('*' + from + '* *' + to + '* ' + message, 'pm');
     };
 
-    chat.client.sendInvite = function (from, to, roomLink) {
+    chat.client.sendInvite = function (from, to, room) {
         if (isSelf({ Name: to })) {
             ui.notify(true);
-            ui.addPrivateMessage('*' + from + '* has invited you to ' + roomLink + '. Click the room name to join.', 'pm');
+            ui.addPrivateMessage('*' + from + '* has invited you to #' + room + '. Click the room name to join.', 'pm');
         }
         else {
-            ui.addPrivateMessage('Invitation to *' + to + '* to join ' + roomLink + ' has been sent.', 'pm');
+            ui.addPrivateMessage('Invitation to *' + to + '* to join #' + room + ' has been sent.', 'pm');
         }
     };
 
@@ -781,7 +782,7 @@
             var viewModel = {
                 name: chat.state.name,
                 hash: chat.state.hash,
-                message: $('<div/>').text(clientMessage.content).html(),
+                message: ui.processContent(clientMessage.content),
                 id: clientMessage.id,
                 date: new Date(),
                 highlight: ''
@@ -912,6 +913,10 @@
         updateCookie();
     });
 
+    $(ui).bind(ui.events.loggedOut, function () {
+        logout();
+    });
+
     $(function () {
         var stateCookie = $.cookie('jabbr.state'),
             state = stateCookie ? JSON.parse(stateCookie) : {};
@@ -932,32 +937,27 @@
             }
 
             connection.hub.logging = logging;
-
             connection.hub.start(options, function () {
                 chat.server.join()
                 .fail(function (e) {
-                    ui.addMessage(e, 'error');
+                    // So refresh the page, our auth token is probably gone
+                    document.location = document.location.pathname;
                 })
-                .done(function (success) {
-                    if (success === false) {
-                        if (ui.showLogin() === true) {
-                            ui.addMessage('Type /login to show the login screen', 'notification');
-                        }
-                        else {
-                            ui.addMessage('Use /nick user password to log in with jabbr', 'notification');
-                            ui.addMessage('To enable janrain login, setup the missing values in web.config', 'notification');
-                        }
-                    }
+                .done(function () {
                     // get list of available commands
                     chat.server.getCommands()
                         .done(function (commands) {
                             ui.setCommands(commands);
                         });
+
                     // get list of available shortcuts
                     chat.server.getShortcuts()
                         .done(function (shortcuts) {
                             ui.setShortcuts(shortcuts);
                         });
+
+                    // populate the lobby rooms
+                    populateLobbyRooms();
                 });
             });
 

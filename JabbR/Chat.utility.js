@@ -54,7 +54,8 @@
     }
 
     function encodeHtml(html) {
-        return $("<div/>").text(html).html();
+        // html still emits double quotes so we need to replace these entities to use them in attributes.
+        return $("<div/>").text(html).html().replace(/\"/g, "&quot;");
     }
 
     String.prototype.fromJsonDate = function () {
@@ -132,6 +133,10 @@
         parseEmojis: function (content) {
             var parser = new Emoji.Parser().parse;
             return (parser(content));
+        },
+        transformEmojis: function (content) {
+            var transformToHtml = new Emoji.Parser().transformToHtml;
+            return (transformToHtml(content));
         },
         decodeHtml: decodeHtml,
         encodeHtml: encodeHtml,

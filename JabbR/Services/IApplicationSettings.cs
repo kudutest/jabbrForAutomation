@@ -3,11 +3,14 @@ namespace JabbR.Services
 {
     public interface IApplicationSettings
     {
-        string AuthApiKey { get; }
+        string EncryptionKey { get; }
+        string VerificationKey { get; }
 
         string DefaultAdminUserName { get; }
-
         string DefaultAdminPassword { get; }
-        string AuthAppId { get; }
+        AuthenticationMode AuthenticationMode { get; }
+
+        bool RequireHttps { get; }
+        bool MigrateDatabase { get; }
     }
 }

@@ -1,14 +1,23 @@
-﻿using System.Configuration;
+﻿using System;
+using System.Configuration;
 
 namespace JabbR.Services
 {
     public class ApplicationSettings : IApplicationSettings
     {
-        public string AuthApiKey
+        public string EncryptionKey
         {
             get
             {
-                return ConfigurationManager.AppSettings["auth.apiKey"];
+                return ConfigurationManager.AppSettings["jabbr:encryptionKey"];
+            }
+        }
+
+        public string VerificationKey
+        {
+            get
+            {
+                return ConfigurationManager.AppSettings["jabbr:verificationKey"];
             }
         }
 
@@ -16,7 +25,7 @@ namespace JabbR.Services
         {
             get
             {
-                return ConfigurationManager.AppSettings["defaultAdminUserName"];
+                return ConfigurationManager.AppSettings["jabbr:defaultAdminUserName"];
             }
         }
 
@@ -24,16 +33,50 @@ namespace JabbR.Services
         {
             get
             {
-                return ConfigurationManager.AppSettings["defaultAdminPassword"];
+                return ConfigurationManager.AppSettings["jabbr:defaultAdminPassword"];
             }
         }
 
-
-        public string AuthAppId
+        public AuthenticationMode AuthenticationMode
         {
-            get 
+            get
             {
-                return ConfigurationManager.AppSettings["auth.appId"];
+                string modeValue = ConfigurationManager.AppSettings["jabbr:authenticationMode"];
+                AuthenticationMode mode;
+                if (Enum.TryParse<AuthenticationMode>(modeValue, out mode))
+                {
+                    return mode;
+                }
+
+                return AuthenticationMode.Default;
+            }
+        }
+
+        public bool RequireHttps
+        {
+            get
+            {
+                string requireHttpsValue = ConfigurationManager.AppSettings["jabbr:requireHttps"];
+                bool requireHttps;
+                if (Boolean.TryParse(requireHttpsValue, out requireHttps))
+                {
+                    return requireHttps;
+                }
+                return false;
+            }
+        }
+
+        public bool MigrateDatabase
+        {
+            get
+            {
+                string migrateDatabaseValue = ConfigurationManager.AppSettings["jabbr:migrateDatabase"];
+                bool migrateDatabase;
+                if (Boolean.TryParse(migrateDatabaseValue, out migrateDatabase))
+                {
+                    return migrateDatabase;
+                }
+                return false;
             }
         }
     }
