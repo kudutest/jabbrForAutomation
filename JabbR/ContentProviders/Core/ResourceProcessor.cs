@@ -1,15 +1,22 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.Composition;
 using System.ComponentModel.Composition.Hosting;
 using System.Linq;
-using System.Net;
 using System.Threading.Tasks;
+using JabbR.Services;
+using Ninject;
 
 namespace JabbR.ContentProviders.Core
 {
     public class ResourceProcessor : IResourceProcessor
     {
-        private readonly Lazy<IList<IContentProvider>> _contentProviders = new Lazy<IList<IContentProvider>>(GetContentProviders);
+        private readonly IList<IContentProvider> _contentProviders;
+
+        public ResourceProcessor(IKernel kernel)
+        {
+            _contentProviders = GetContentProviders(kernel);
+        }
 
         public Task<ContentProviderResult> ExtractResource(string url)
         {
@@ -25,10 +32,8 @@ namespace JabbR.ContentProviders.Core
 
         private Task<ContentProviderResult> ExtractContent(ContentProviderHttpRequest request)
         {
-            var contentProviders = _contentProviders.Value;
-
-            var validProviders = contentProviders.Where(c => c.IsValidContent(request.RequestUri))
-                                                 .ToList();
+            var validProviders = _contentProviders.Where(c => c.IsValidContent(request.RequestUri))
+                                                  .ToList();
 
             if (validProviders.Count == 0)
             {
@@ -62,10 +67,11 @@ namespace JabbR.ContentProviders.Core
         }
 
 
-        private static IList<IContentProvider> GetContentProviders()
+        private static IList<IContentProvider> GetContentProviders(IKernel kernel)
         {
             // Use MEF to locate the content providers in this assembly
             var compositionContainer = new CompositionContainer(new AssemblyCatalog(typeof(ResourceProcessor).Assembly));
+            compositionContainer.ComposeExportedValue(kernel);
             return compositionContainer.GetExportedValues<IContentProvider>().ToList();
         }
     }

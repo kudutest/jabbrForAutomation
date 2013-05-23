@@ -1,4 +1,5 @@
 ﻿using JabbR.Models;
+using JabbR.UploadHandlers;
 
 namespace JabbR.Services
 {
@@ -17,6 +18,7 @@ namespace JabbR.Services
 
         // Messages
         ChatMessage AddMessage(ChatUser user, ChatRoom room, string id, string content);
+        ChatMessage AddMessage(string userId, string roomName, string url);
 
         // Owner commands
         void AddOwner(ChatUser user, ChatUser targetUser, ChatRoom targetRoom);
@@ -35,5 +37,10 @@ namespace JabbR.Services
         void AddAdmin(ChatUser admin, ChatUser targetUser);
         void RemoveAdmin(ChatUser admin, ChatUser targetUser);
         void BanUser(ChatUser callingUser, ChatUser targetUser);
+
+        void AddAttachment(ChatMessage message, string fileName, string contentType, long size, UploadResult result);
+
+        // Add mention
+        void AddNotification(ChatUser mentionedUser, ChatMessage message, ChatRoom room, bool markAsRead);
     }
 }

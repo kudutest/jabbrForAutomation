@@ -2,14 +2,18 @@
 /// <reference path="Scripts/jQuery.tmpl.js" />
 /// <reference path="Scripts/jquery.cookie.js" />
 /// <reference path="Chat.toast.js" />
-/*global Emoji:true*/
-(function ($, window, document, utility) {
+/// <reference path="Scripts/livestamp.min.js" />
+/// <reference path="Scripts/moment.min.js" />
+
+/*jshint bitwise:false */
+(function ($, window, document, chat, utility, emoji, linkify) {
     "use strict";
 
     var $chatArea = null,
         $tabs = null,
         $submitButton = null,
         $newMessage = null,
+        $roomActions = null,
         $toast = null,
         $disconnectDialog = null,
         $downloadIcon = null,
@@ -22,14 +26,12 @@
         $sound = null,
         templates = null,
         focus = true,
-        commands = [],
-        shortcuts = [],
+        readOnly = false,
         Keys = { Up: 38, Down: 40, Esc: 27, Enter: 13, Slash: 47, Space: 32, Tab: 9, Question: 191 },
         scrollTopThreshold = 75,
         toast = window.chat.toast,
         preferences = null,
         $login = null,
-        name,
         lastCycledMessage = null,
         $helpPopup = null,
         $helpBody = null,
@@ -42,15 +44,61 @@
         $window = $(window),
         $document = $(document),
         $lobbyRoomFilterForm = null,
+        lobbyLoaded = false,
         $roomFilterInput = null,
         $closedRoomFilter = null,
         updateTimeout = 15000,
         $richness = null,
         lastPrivate = null,
-        roomCache = {};
+        roomCache = {},
+        $reloadMessageNotification = null,
+        popoverTimer = null,
+        $connectionStatus = null,
+        connectionState = -1,
+        $connectionStateChangedPopover = null,
+        connectionStateIcon = null,
+        $connectionInfoPopover = null,
+        $connectionInfoContent = null,
+        $fileUploadButton = null,
+        $hiddenFile = null,
+        $uploadForm = null,
+        $clipboardUpload = null,
+        $clipboardUploadPreview = null,
+        $clipboardUploadButton = null,
+        $fileRoom = null,
+        $fileConnectionId = null,
+        connectionInfoStatus = null,
+        connectionInfoTransport = null,
+        $topicBar = null,
+        $loadingHistoryIndicator = null,
+        trimRoomHistoryFrequency = 1000 * 60 * 2, // 2 minutes in ms
+        $loadMoreRooms = null,
+        sortedRoomList = null,
+        maxRoomsToLoad = 100,
+        lastLoadedRoomIndex = 0,
+        $lobbyPrivateRooms = null,
+        $lobbyOtherRooms = null,
+        $roomLoadingIndicator = null,
+        roomLoadingDelay = 250,
+        roomLoadingTimeout = null,
+        Room = chat.Room,
+        $unreadNotificationCount = null;
+
+    function getRoomNameFromHash(hash) {
+        if (hash.length && hash[0] === '/') {
+            hash = hash.substr(1);
+        }
+
+        var parts = hash.split('/');
+        if (parts[0] === 'rooms') {
+            return parts[1];
+        }
+
+        return null;
+    }
 
     function getRoomId(roomName) {
-        return window.escape(roomName.toLowerCase()).replace(/[^a-z0-9]/, '_');
+        return window.escape(roomName.toString().toLowerCase()).replace(/[^A-Za-z0-9]/g, '_');
     }
 
     function getUserClassName(userName) {
@@ -61,322 +109,45 @@
         return '_room_' + roomName;
     }
 
-    function showClosedRoomsInLobby() {
-        return $closedRoomFilter.is(':checked');
+    function setRoomLoading(isLoading, roomName) {
+        if (isLoading) {
+            var room = getRoomElements(roomName);
+            if (!room.isInitialized()) {
+                roomLoadingTimeout = window.setTimeout(function () {
+                    $roomLoadingIndicator.find('i').addClass('icon-spin');
+                    $roomLoadingIndicator.show();
+                }, roomLoadingDelay);
+            }
+        } else {
+            if (roomLoadingTimeout) {
+                clearTimeout(roomLoadingDelay);
+            }
+            $roomLoadingIndicator.hide();
+            $roomLoadingIndicator.find('i').removeClass('icon-spin');
+        }
     }
 
-    function Room($tab, $usersContainer, $usersOwners, $usersActive, $usersIdle, $messages, $roomTopic) {
-        this.tab = $tab;
-        this.users = $usersContainer;
-        this.owners = $usersOwners;
-        this.activeUsers = $usersActive;
-        this.idleUsers = $usersIdle;
-        this.messages = $messages;
-        this.roomTopic = $roomTopic;
+    function populateLobbyRoomList(item, template, listToPopulate) {
+        $.tmpl(template, item).appendTo(listToPopulate);
+    }
 
-        function glowTab(n) {
-            // Stop if we're not unread anymore
-            if (!$tab.hasClass('unread')) {
-                return;
+    function sortRoomList(listToSort) {
+        var sortedList = listToSort.sort(function (a, b) {
+            if (a.Closed && !b.Closed) {
+                return 1;
+            } else if (b.Closed && !a.Closed) {
+                return -1;
             }
 
-            // Go light
-            $tab.animate({ backgroundColor: '#e5e5e5', color: '#000000' }, 800, function () {
-                // Stop if we're not unread anymore
-                if (!$tab.hasClass('unread')) {
-                    return;
-                }
-
-                n--;
-
-                // Check if we're on our last glow
-                if (n !== 0) {
-                    // Go dark
-                    $tab.animate({ backgroundColor: '#164C85', color: '#ffffff' }, 800, function () {
-                        // Glow the tab again
-                        glowTab(n);
-                    });
-                }
-                else {
-                    // Leave the tab highlighted
-                    $tab.animate({ backgroundColor: '#043C4C', color: '#ffffff' }, 800);
-                }
-            });
-        }
-
-        this.isLocked = function () {
-            return this.tab.hasClass('locked');
-        };
-
-        this.isLobby = function () {
-            return this.tab.hasClass('lobby');
-        };
-
-        this.hasUnread = function () {
-            return this.tab.hasClass('unread');
-        };
-
-        this.hasMessages = function () {
-            return this.tab.data('messages');
-        };
-
-        this.updateMessages = function (value) {
-            this.tab.data('messages', value);
-        };
-
-        this.getUnread = function () {
-            return $tab.data('unread') || 0;
-        };
-
-        this.hasSeparator = function () {
-            return this.messages.find('.message-separator').length > 0;
-        };
-
-        this.needsSeparator = function () {
-            if (this.isActive()) {
-                return false;
-            }
-            return this.isInitialized() && this.getUnread() === 5;
-        };
-
-        this.addSeparator = function () {
-            if (this.isLobby()) {
-                return;
+            if (a.Count > b.Count) {
+                return -1;
+            } else if (b.Count > a.Count) {
+                return 1;
             }
 
-            // find first correct unread message
-            var n = this.getUnread(),
-                $unread = this.messages.find('.message').eq(-(n + 1));
-
-            $unread.after(templates.separator.tmpl())
-                .data('unread', n); // store unread count
-
-            this.scrollToBottom();
-        };
-
-        this.removeSeparator = function () {
-            this.messages.find('.message-separator').fadeOut(2000, function () {
-                $(this).remove();
-            });
-        };
-
-        this.updateUnread = function (isMentioned) {
-            var $tab = this.tab.addClass('unread'),
-                $content = $tab.find('.content'),
-                unread = ($tab.data('unread') || 0) + 1,
-                hasMentions = $tab.data('hasMentions') || isMentioned; // Whether or not the user already has unread messages to him/her
-
-            $content.text((hasMentions ? '*' : '') + '(' + unread + ') ' + this.getName());
-
-            $tab.data('unread', unread);
-            $tab.data('hasMentions', hasMentions);
-
-            if (!this.isActive() && unread === 1) {
-                // If this room isn't active then we're going to glow the tab
-                // to get the user's attention
-                glowTab(6);
-            }
-        };
-
-        this.scrollToBottom = function () {
-            // IE will repaint if we do the Chrome bugfix and look jumpy
-            if ($.browser.webkit) {
-                // Chrome fix for hiding and showing scroll areas
-                this.messages.scrollTop(this.messages.scrollTop() - 1);
-            }
-            this.messages.scrollTop(this.messages[0].scrollHeight);
-        };
-
-        this.isNearTheEnd = function () {
-            return this.messages.isNearTheEnd();
-        };
-
-        this.getName = function () {
-            return this.tab.data('name');
-        };
-
-        this.isActive = function () {
-            return this.tab.hasClass('current');
-        };
-
-        this.exists = function () {
-            return this.tab.length > 0;
-        };
-
-        this.isClosed = function () {
-            return this.tab.attr('data-closed') === 'true';
-        };
-
-        this.close = function () {
-            this.tab.attr('data-closed', true);
-            this.tab.addClass('closed');
-        };
-
-        this.unClose = function () {
-            this.tab.attr('data-closed', false);
-            this.tab.removeClass('closed');
-        };
-
-        this.clear = function () {
-            this.messages.empty();
-            this.owners.empty();
-            this.activeUsers.empty();
-            this.idleUsers.empty();
-        };
-
-        this.makeInactive = function () {
-            this.tab.removeClass('current');
-
-            this.messages.removeClass('current')
-                         .hide();
-
-            this.users.removeClass('current')
-                      .hide();
-
-            this.roomTopic.removeClass('current')
-                      .hide();
-
-            if (this.isLobby()) {
-                $lobbyRoomFilterForm.hide();
-            }
-        };
-
-        this.makeActive = function () {
-            var currUnread = this.getUnread(),
-                lastUnread = this.messages.find('.message-separator').data('unread') || 0;
-
-            if (!utility.isMobile) {
-                $newMessage.focus();
-            }
-
-            this.tab.addClass('current')
-                    .removeClass('unread')
-                    .stop(true, true)
-                    .css('backgroundColor', '')
-                    .css('color', '')
-                    .data('unread', 0)
-                    .data('hasMentions', false)
-                    .find('.content')
-                    .text(this.getName());
-
-            this.messages.addClass('current')
-                         .show();
-
-            this.users.addClass('current')
-                      .show();
-
-            this.roomTopic.addClass('current')
-                      .show();
-
-            if (this.isLobby()) {
-                $lobbyRoomFilterForm.show();
-            }
-            // if no unread since last separator
-            // remove previous separator
-            if (currUnread <= lastUnread) {
-                this.removeSeparator();
-            }
-        };
-
-        this.setInitialized = function () {
-            this.tab.data('initialized', true);
-        };
-
-        this.isInitialized = function () {
-            return this.tab.data('initialized') === true;
-        };
-
-        // Users
-        this.getUser = function (userName) {
-            return this.users.find(getUserClassName(userName));
-        };
-
-        this.getUserReferences = function (userName) {
-            return $.merge(this.getUser(userName),
-                           this.messages.find(getUserClassName(userName)));
-        };
-
-        this.setLocked = function () {
-            this.tab.addClass('locked');
-        };
-
-        this.setListState = function (list) {
-            if (list.children('li').length > 0) {
-                var roomEmptyStatus = list.children('li.empty');
-                if (roomEmptyStatus.length === 0) {
-                    return;
-                } else {
-                    roomEmptyStatus.remove();
-                    return;
-                }
-            }
-            list.append($('<li class="empty">No users</li>'));
-        };
-
-        this.addUser = function (userViewModel, $user) {
-            if (userViewModel.active) {
-                this.addUserToList($user, this.activeUsers);
-            } else if (userViewModel.owner) {
-                this.addUserToList($user, this.owners);
-            }
-            else {
-                this.addUserToList($user, this.idleUsers);
-            }
-        };
-
-        this.addUserToList = function ($user, list) {
-            var oldParentList = $user.parent('ul');
-            $user.appendTo(list);
-            this.setListState(list);
-            if (typeof oldParentList !== undefined) {
-                this.setListState(oldParentList);
-            }
-        };
-
-        this.appearsInList = function ($user, list) {
-            return $user.parent('ul').attr('id') == list.attr('id');
-        };
-
-        this.updateUserStatus = function ($user) {
-            var owner = $user.data('owner') || false;
-
-            if (owner === true) {
-                if (!this.appearsInList($user, this.owners)) {
-                    this.addUserToList($user, this.owners);
-                }
-                return;
-            }
-
-            var status = $user.data('active');
-            if (typeof status === "undefined") {
-                return;
-            }
-
-            if (status === true) {
-                if (!this.appearsInList($user, this.activeUsers)) {
-                    this.addUserToList($user, this.activeUsers);
-                }
-            } else {
-                if (!this.appearsInList($user, this.idleUsers)) {
-                    this.addUserToList($user, this.idleUsers);
-                }
-            }
-        };
-
-        this.sortLists = function () {
-            this.sortList(this.activeUsers);
-            this.sortList(this.idleUsers);
-        };
-
-        this.sortList = function (listToSort) {
-            var listItems = listToSort.children('li').get();
-            listItems.sort(function (a, b) {
-                var compA = $(a).data('name').toString().toUpperCase();
-                var compB = $(b).data('name').toString().toUpperCase();
-                return (compA < compB) ? -1 : (compA > compB) ? 1 : 0;
-            });
-            $.each(listItems, function (index, item) { listToSort.append(item); });
-        };
+            return a.Name.toString().toUpperCase().localeCompare(b.Name.toString().toUpperCase());
+        });
+        return sortedList;
     }
 
     function getRoomElements(roomName) {
@@ -385,20 +156,29 @@
                         $('#userlist-' + roomId),
                         $('#userlist-' + roomId + '-owners'),
                         $('#userlist-' + roomId + '-active'),
-                        $('#userlist-' + roomId + '-idle'),
                         $('#messages-' + roomId),
                         $('#roomTopic-' + roomId));
         return room;
     }
 
     function getCurrentRoomElements() {
-        var room = new Room($tabs.find('li.current'),
-                        $('.users.current'),
-                        $('.userlist.current .owners'),
-                        $('.userlist.current .active'),
-                        $('.userlist.current .idle'),
-                        $('.messages.current'),
-                        $('.roomTopic.current'));
+        var $tab = $tabs.find('li.current');
+        var room;
+        if ($tab.data('name') === 'Lobby') {
+            room = new Room($tab,
+                $('#userlist-lobby'),
+                $('#userlist-lobby-owners'),
+                $('#userlist-lobby-active'),
+                $('.messages.current'),
+                $('.roomTopic.current'));
+        } else {
+            room = new Room($tab,
+                $('.users.current'),
+                $('.userlist.current .owners'),
+                $('.userlist.current .active'),
+                $('.messages.current'),
+                $('.roomTopic.current'));
+        }
         return room;
     }
 
@@ -416,29 +196,129 @@
 
     function getRoomsNames() {
         var lobby = getLobby();
+
         return lobby.users.find('li')
-                     .map(function () { return $(this).data('name') + ' '; });
+                     .map(function () {
+                         var room = $(this).data('name');
+                         roomCache[room.toString().toUpperCase()] = true;
+                         return room + ' ';
+                     });
     }
 
     function updateLobbyRoomCount(room, count) {
         var lobby = getLobby(),
-            $room = lobby.users.find('[data-room="' + room.Name + '"]'),
-            $count = $room.find('.count');
+            $targetList = room.Private === true ? lobby.owners : lobby.users,
+            $room = $targetList.find('[data-room="' + room.Name + '"]'),
+            $count = $room.find('.count'),
+            roomName = room.Name.toString().toUpperCase();
 
         $room.css('background-color', '#f5f5f5');
-        $count.text(' (' + count + ')');
+        if (count === 0) {
+            $count.text('Unoccupied');
+        } else if (count === 1) {
+            $count.text('1 occupant');
+        } else {
+            $count.text(count + ' occupants');
+        }
 
         if (room.Private === true) {
             $room.addClass('locked');
+        } else {
+            $room.removeClass('locked');
         }
+
         if (room.Closed === true) {
             $room.addClass('closed');
+        } else {
+            $room.removeClass('closed');
+        }
+
+        var nextListElement = getNextRoomListElement($targetList, roomName, count, room.Closed);
+
+        $room.data('count', count);
+        if (nextListElement !== null) {
+            $room.insertBefore(nextListElement);
+        } else {
+            $room.appendTo($targetList);
         }
 
         // Do a little animation
-        $room.animate({ backgroundColor: '#e5e5e5' }, 800);
+        $room.animate({ backgroundColor: '#ffffff' }, 800);
     }
 
+    function addRoomToLobby(roomViewModel) {
+        var lobby = getLobby(),
+            $room = templates.lobbyroom.tmpl(roomViewModel),
+            roomName = roomViewModel.Name.toString().toUpperCase(),
+            count = roomViewModel.Count,
+            closed = roomViewModel.Closed,
+            $targetList = roomViewModel.Private ? lobby.owners : lobby.users;
+
+        var nextListElement = getNextRoomListElement($targetList, roomName, count, closed);
+
+        if (nextListElement !== null) {
+            $room.insertBefore(nextListElement);
+        } else {
+            $room.appendTo($targetList);
+        }
+
+        filterIndividualRoom($room);
+    }
+    
+    function getNextRoomListElement($targetList, roomName, count, closed) {
+        var nextListElement = null;
+
+        // move the item to before the next element
+        $targetList.find('li').each(function () {
+            var $this = $(this),
+                liRoomCount = $this.data('count'),
+                liRoomClosed = $this.hasClass('closed'),
+                name = $this.data('name'),
+                nameComparison;
+
+            if (name === undefined) {
+                return true;
+            }
+
+            nameComparison = name.toString().toUpperCase().localeCompare(roomName);
+
+            // skip this element
+            if (nameComparison === 0) {
+                return true;
+            }
+
+            // skip closed rooms which always go after unclosed ones
+            if (!liRoomClosed && closed) {
+                return true;
+            }
+
+            // skip where we have more occupants
+            if (liRoomCount > count) {
+                return true;
+            }
+
+            // skip where we have the same number of occupants but the room is alphabetically earlier
+            if (liRoomCount === count && nameComparison < 0) {
+                return true;
+            }
+
+            nextListElement = $this;
+            return false;
+        });
+
+        return nextListElement;
+    }
+    
+    function filterIndividualRoom($room) {
+        var filter = $roomFilterInput.val().toUpperCase(),
+            showClosedRooms = $closedRoomFilter.is(':checked');
+        
+        if ($room.data('room').toString().toUpperCase().score(filter) > 0.0 && (showClosedRooms || !$room.is('.closed'))) {
+            $room.show();
+        } else {
+            $room.hide();
+        }
+    }
 
     function addRoom(roomViewModel) {
         // Do nothing if the room exists
@@ -464,7 +344,11 @@
             closed: roomViewModel.Closed
         };
 
-        roomCache[roomName.toLowerCase()] = true;
+        if (!roomCache[roomName.toString().toUpperCase()]) {
+            addRoomToLobby(roomViewModel);
+        }
+
+        roomCache[roomName.toString().toUpperCase()] = true;
 
         templates.tab.tmpl(viewModel).data('name', roomName).appendTo($tabs);
 
@@ -475,41 +359,31 @@
 
         $roomTopic = $('<div/>').attr('id', 'roomTopic-' + roomId)
                               .addClass('roomTopic')
-                              .appendTo($chatArea)
+                              .appendTo($topicBar)
                               .hide();
 
-        if (roomName !== "lobby") {
-            userContainer = $('<div/>').attr('id', 'userlist-' + roomId)
-                .addClass('users')
-                .appendTo($chatArea).hide();
-            templates.userlist.tmpl({ listname: '- Room Owners', id: 'userlist-' + roomId + '-owners' })
-                .addClass('owners')
-                .appendTo(userContainer);
-            templates.userlist.tmpl({ listname: '- Online', id: 'userlist-' + roomId + '-active' })
-                .addClass('active')
-                .appendTo(userContainer);
-            templates.userlist.tmpl({ listname: '- Away', id: 'userlist-' + roomId + '-idle' })
-                .addClass('idle')
-                .appendTo(userContainer);
-            userContainer.find('h3').click(function () {
-                if ($.trim($(this).text())[0] === '-') {
-                    $(this).text($(this).text().replace('-', '+'));
-                } else {
-                    $(this).text($(this).text().replace('+', '-'));
-                }
-                $(this).next().toggle(0);
-                return false;
-            });
-        } else {
-            $('<ul/>').attr('id', 'userlist-' + roomId)
-                .addClass('users')
-                .appendTo($chatArea).hide();
-        }
-
+        userContainer = $('<div/>').attr('id', 'userlist-' + roomId)
+            .addClass('users')
+            .appendTo($chatArea).hide();
+        templates.userlist.tmpl({ listname: '- Room Owners', id: 'userlist-' + roomId + '-owners' })
+            .addClass('owners')
+            .appendTo(userContainer);
+        templates.userlist.tmpl({ listname: '- Users', id: 'userlist-' + roomId + '-active' })
+            .appendTo(userContainer);
+        userContainer.find('h3').click(function () {
+            if ($.trim($(this).text())[0] === '-') {
+                $(this).text($(this).text().replace('-', '+'));
+            } else {
+                $(this).text($(this).text().replace('+', '-'));
+            }
+            $(this).next().toggle(0);
+            return false;
+        });
+        
         $tabs.find('li')
             .not('.lobby')
             .sortElements(function (a, b) {
-                return $(a).data('name').toLowerCase() > $(b).data('name').toLowerCase() ? 1 : -1;
+                return $(a).data('name').toString().toUpperCase() > $(b).data('name').toString().toUpperCase() ? 1 : -1;
             });
 
         scrollHandler = function (ev) {
@@ -529,7 +403,7 @@
                 if ($child.length > 0) {
                     messageId = $child.attr('id')
                                       .substr(2); // Remove the "m-"
-                    $ui.trigger(ui.events.scrollRoomTop, [{ name: roomName, messageId: messageId}]);
+                    $ui.trigger(ui.events.scrollRoomTop, [{ name: roomName, messageId: messageId }]);
                 }
             }
         };
@@ -541,6 +415,8 @@
         $messages.data('scrollHandler', scrollHandler);
 
         setAccessKeys();
+
+        lobbyLoaded = false;
         return true;
     }
 
@@ -556,6 +432,7 @@
             room.tab.remove();
             room.messages.remove();
             room.users.remove();
+            room.roomTopic.remove();
             setAccessKeys();
         }
     }
@@ -574,7 +451,15 @@
     }
 
     function navigateToRoom(roomName) {
-        $.history.load('/rooms/' + roomName);
+        var hash = (document.location.hash || '#').substr(1),
+            hashRoomName = getRoomNameFromHash(hash);
+
+        if (hashRoomName && hashRoomName === roomName) {
+            ui.setActiveRoomCore(roomName);
+        }
+        else {
+            document.location.hash = '#/rooms/' + roomName;
+        }
     }
 
     function processMessage(message, roomName) {
@@ -607,16 +492,34 @@
     }
 
     function triggerFocus() {
-        ui.focus = true;
-        $ui.trigger(ui.events.focusit);
+        if (!utility.isMobile && !readOnly) {
+            $newMessage.focus();
+        }
+
+        if (focus === false) {
+            focus = true;
+            $ui.trigger(ui.events.focusit);
+        }
     }
 
     function loadPreferences() {
         // Restore the global preferences
     }
 
+    function toggleRichness($element, roomName) {
+        var blockRichness = roomName ? getRoomPreference(roomName, 'blockRichness') : preferences.blockRichness;
+
+        if (blockRichness === true) {
+            $element.addClass('off');
+        }
+        else {
+            $element.removeClass('off');
+        }
+    }
+
     function toggleElement($element, preferenceName, roomName) {
         var value = roomName ? getRoomPreference(roomName, preferenceName) : preferences[preferenceName];
+
         if (value === true) {
             $element.removeClass('off');
         }
@@ -631,7 +534,7 @@
         // Placeholder for room level preferences
         toggleElement($sound, 'hasSound', roomName);
         toggleElement($toast, 'canToast', roomName);
-        toggleElement($richness, 'blockRichness', roomName);
+        toggleRichness($richness, roomName);
     }
 
     function setPreference(name, value) {
@@ -672,10 +575,16 @@
     }
 
     function triggerSend() {
+        if (readOnly) {
+            return;
+        }
+
         var msg = $.trim($newMessage.val());
 
+        focus = true;
+
         if (msg) {
-            if (msg.toLowerCase() == '/login') {
+            if (msg.toUpperCase() === '/LOGIN') {
                 ui.showLogin();
             }
             else {
@@ -686,8 +595,6 @@
         $newMessage.val('');
         $newMessage.focus();
 
-        triggerFocus();
-
         // always scroll to bottom after new message sent
         var room = getCurrentRoomElements();
         room.scrollToBottom();
@@ -695,7 +602,7 @@
     }
 
     function updateNote(userViewModel, $user) {
-        var $note = $user.find('.note'),
+        var $title = $user.find('.name'),
             noteText = userViewModel.note,
             noteTextEncoded = null,
             requireRoomUpdate = false;
@@ -714,19 +621,17 @@
         noteTextEncoded = $('<div/>').html(noteText).text();
 
         // Remove all classes and the text
-        $note.removeClass('afk message');
-        $note.removeAttr('title');
+        $title.removeAttr('title');
 
-        $note.addClass(userViewModel.noteClass);
         if (userViewModel.note) {
-            $note.attr('title', noteTextEncoded);
+            $title.attr('title', noteTextEncoded);
         }
 
         if (requireRoomUpdate) {
             $user.each(function () {
                 var room = getRoomElements($(this).data('inroom'));
                 room.updateUserStatus($(this));
-                room.sortLists();
+                room.sortLists($(this));
             });
         }
     }
@@ -734,11 +639,17 @@
     function updateFlag(userViewModel, $user) {
         var $flag = $user.find('.flag');
 
-        $flag.removeClass();
+        $flag.removeAttr('class');
         $flag.addClass('flag');
         $flag.removeAttr('title');
 
-        $flag.addClass(userViewModel.flagClass);
+        if (userViewModel.flagClass) {
+            $flag.addClass(userViewModel.flagClass);
+            $flag.show();
+        } else {
+            $flag.hide();
+        }
+
         if (userViewModel.country) {
             $flag.attr('title', userViewModel.country);
         }
@@ -747,41 +658,61 @@
     function updateRoomTopic(roomViewModel) {
         var room = getRoomElements(roomViewModel.Name);
         var topic = roomViewModel.Topic;
-        var topicHtml = topic === '' ? 'You\'re chatting in ' + roomViewModel.Name : '<strong>Topic: </strong>' + ui.processContent(topic);
+        var topicHtml = topic === '' ? 'You\'re chatting in ' + roomViewModel.Name : ui.processContent(topic);
         var roomTopic = room.roomTopic;
         var isVisibleRoom = getCurrentRoomElements().getName() === roomViewModel.Name;
+
         if (isVisibleRoom) {
             roomTopic.hide();
         }
+
         roomTopic.html(topicHtml);
+
         if (isVisibleRoom) {
             roomTopic.fadeIn(2000);
         }
     }
 
-    // Rotating Tips.
-    var messages = [
-                'Type @ then press TAB to auto-complete nicknames',
-                'Use ? or type /? to display the FAQ and list of commands',
-                'Type : then press TAB to auto-complete emoji icons',
-                'You can create your own private rooms. Use ? or type /? for more info'
-            ];
-
-    var cycleTimeInMilliseconds = 60 * 1000; // 1 minute.
-    var messageIndex = 0;
-
-    function cycleMessages() {
-        setTimeout(function () {
-            messageIndex++;
-            if (messageIndex >= messages.length) {
-                messageIndex = 0;
+    function getConnectionStateChangedPopoverOptions(statusText) {
+        var options = {
+            html: true,
+            trigger: 'hover',
+            template: $connectionStateChangedPopover,
+            content: function () {
+                return statusText;
             }
-            $('#message-instruction').fadeOut(2000, function () {
-                $('#message-instruction').html(messages[messageIndex]);
-            });
+        };
+        return options;
+    }
 
-            $('#message-instruction').fadeIn(2000, cycleMessages);
-        }, cycleTimeInMilliseconds);
+    function getConnectionInfoPopoverOptions(transport) {
+        var options = {
+            html: true,
+            trigger: 'hover',
+            delay: {
+                show: 0,
+                hide: 500
+            },
+            template: $connectionInfoPopover,
+            content: function () {
+                var connectionInfo = $connectionInfoContent;
+                connectionInfo.find(connectionInfoStatus).text('Status: Connected');
+                connectionInfo.find(connectionInfoTransport).text('Transport: ' + transport);
+                return connectionInfo.html();
+            }
+        };
+        return options;
+    }
+
+    function loadMoreLobbyRooms() {
+        var lobby = getLobby(),
+            moreRooms = sortedRoomList.slice(lastLoadedRoomIndex, lastLoadedRoomIndex + maxRoomsToLoad);
+
+        populateLobbyRoomList(moreRooms, templates.lobbyroom, lobby.users);
+        lastLoadedRoomIndex = lastLoadedRoomIndex + maxRoomsToLoad;
+        
+        // re-filter lists
+        $lobbyRoomFilterForm.submit();
     }
 
     var ui = {
@@ -800,7 +731,9 @@
             focusit: 'jabbr.ui.focusit',
             blurit: 'jabbr.ui.blurit',
             preferencesChanged: 'jabbr.ui.preferencesChanged',
-            loggedOut: 'jabbr.ui.loggedOut'
+            loggedOut: 'jabbr.ui.loggedOut',
+            reloadMessages: 'jabbr.ui.reloadMessages',
+            fileUploaded: 'jabbr.ui.fileUploaded'
         },
 
         help: {
@@ -817,10 +750,11 @@
             $tabs = $('#tabs');
             $submitButton = $('#send');
             $newMessage = $('#new-message');
-            $toast = $('#preferences .toast');
-            $sound = $('#preferences .sound');
-            $richness = $('#preferences .richness');
-            $downloadIcon = $('#preferences .download');
+            $roomActions = $('#room-actions');
+            $toast = $('#room-preferences .toast');
+            $sound = $('#room-preferences .sound');
+            $richness = $('#room-preferences .richness');
+            $downloadIcon = $('#room-preferences .download');
             $downloadDialog = $('#download-dialog');
             $downloadDialogButton = $('#download-dialog-button');
             $downloadRange = $('#download-range');
@@ -829,6 +763,9 @@
             $disconnectDialog = $('#disconnect-dialog');
             $login = $('#jabbr-login');
             $helpPopup = $('#jabbr-help');
+            $clipboardUpload = $('#jabbr-clipboard-upload');
+            $clipboardUploadPreview = $('#jabbr-clipboard-upload #clipboard-upload-preview');
+            $clipboardUploadButton = $('#jabbr-clipboard-upload #clipboard-upload');
             $helpBody = $('#jabbr-help .help-body');
             $shortCutHelp = $('#jabbr-help #shortcut');
             $globalCmdHelp = $('#jabbr-help #global');
@@ -836,9 +773,9 @@
             $userCmdHelp = $('#jabbr-help #user');
             $updatePopup = $('#jabbr-update');
             focus = true;
-            $lobbyRoomFilterForm = $('#users-filter-form'),
-            $roomFilterInput = $('#users-filter'),
-            $closedRoomFilter = $('#users-filter-closed');
+            $lobbyRoomFilterForm = $('#room-filter-form'),
+            $roomFilterInput = $('#room-filter'),
+            $closedRoomFilter = $('#room-filter-closed');
             templates = {
                 userlist: $('#new-userlist-template'),
                 user: $('#new-user-template'),
@@ -848,9 +785,34 @@
                 tab: $('#new-tab-template'),
                 gravatarprofile: $('#gravatar-profile-template'),
                 commandhelp: $('#command-help-template'),
-                multiline: $('#multiline-content-template')
+                multiline: $('#multiline-content-template'),
+                lobbyroom: $('#new-lobby-room-template'),
+                otherlobbyroom: $('#new-other-lobby-room-template')
             };
+            $reloadMessageNotification = $('#reloadMessageNotification');
+            $fileUploadButton = $('.upload-button');
+            $hiddenFile = $('#hidden-file');
+            $uploadForm = $('#upload');
+            $fileRoom = $('#file-room');
+            $fileConnectionId = $('#file-connection-id');
+            $connectionStatus = $('#connectionStatus');
 
+            $connectionStateChangedPopover = $('#connection-state-changed-popover');
+            connectionStateIcon = '#popover-content-icon';
+            $connectionInfoPopover = $('#connection-info-popover');
+            $connectionInfoContent = $('#connection-info-content');
+            connectionInfoStatus = '#connection-status';
+            connectionInfoTransport = '#connection-transport';
+            $topicBar = $('#topic-bar');
+            $loadingHistoryIndicator = $('#loadingRoomHistory');
+
+            $loadMoreRooms = $('#load-more-rooms-item');
+            $lobbyPrivateRooms = $('#lobby-private');
+            $lobbyOtherRooms = $('#lobby-other');
+            $roomLoadingIndicator = $('#room-loading');
+
+            $unreadNotificationCount = $('#notification-unread-count');
+            
             if (toast.canToast()) {
                 $toast.show();
             }
@@ -859,12 +821,12 @@
                 $downloadIcon.css({ left: '90px' });
                 // We need to set the toast setting to false
                 preferences.canToast = false;
+                $toast.hide();
             }
 
             // DOM events
             $document.on('click', 'h3.collapsible_title', function () {
-                var $message = $(this).closest('.message'),
-                    nearEnd = ui.isNearTheEnd();
+                var nearEnd = ui.isNearTheEnd();
 
                 $(this).next().toggle(0, function () {
                     if (nearEnd) {
@@ -877,12 +839,41 @@
                 ui.setActiveRoom($(this).data('name'));
             });
 
-            $document.on('click', 'li.room', function () {
-                var roomName = $(this).data('name');
+            $document.on('mousedown', '#tabs li', function (ev) {
+                // if middle mouse
+                if (ev.which === 2) {
+                    $ui.trigger(ui.events.closeRoom, [$(this).data('name')]);
+                }
+            });
 
-                navigateToRoom(roomName);
+            $document.on('click', 'li.room .room-row', function () {
+                var roomName = $(this).parent().data('name'),
+                    room = getRoomElements(roomName);
 
-                return false;
+                if (room.exists()) {
+                    ui.setActiveRoom(roomName);
+                }
+                else {
+                    $ui.trigger(ui.events.openRoom, [roomName]);
+                }
+            });
+
+            $document.on('click', '#load-more-rooms-item', function () {
+                var spinner = $loadMoreRooms.find('i'),
+                    lobby = getLobby();
+                spinner.addClass('icon-spin');
+                spinner.show();
+                var loader = $loadMoreRooms.find('.load-more-rooms a');
+                loader.html(' Loading more rooms...');
+                loadMoreLobbyRooms();
+                spinner.hide();
+                spinner.removeClass('icon-spin');
+                loader.html('Load More...');
+                if (lastLoadedRoomIndex < sortedRoomList.length) {
+                    $loadMoreRooms.show();
+                } else {
+                    $loadMoreRooms.hide();
+                }
             });
 
             $document.on('click', '#tabs li .close', function (ev) {
@@ -906,6 +897,10 @@
                 }
             });
 
+            $document.on('click', '#reloadMessageNotification a', function () {
+                $ui.trigger(ui.events.reloadMessages);
+            });
+
             // handle tab cycling - we skip the lobby when cycling
             // handle shift+/ - display help command
             $document.on('keydown', function (ev) {
@@ -923,7 +918,9 @@
                     }
 
                     ui.setActiveRoom($tabs.children().eq(index).data('name'));
-                    $newMessage.focus();
+                    if (!readOnly) {
+                        $newMessage.focus();
+                    }
                 }
 
                 if (!$newMessage.is(':focus') && ev.shiftKey && ev.keyCode === Keys.Question) {
@@ -950,6 +947,10 @@
 
             // handle click on names in chat / room list
             var prepareMessage = function (ev) {
+                if (readOnly) {
+                    return false;
+                }
+
                 var message = $newMessage.val().trim();
 
                 // If it was a message to another person, replace that
@@ -1008,7 +1009,7 @@
                 var enabled = !$(this).hasClass('off');
 
                 // Store the preference
-                setRoomPreference(room.getName(), 'blockRichness', enabled);
+                setRoomPreference(room.getName(), 'blockRichness', !enabled);
 
                 // toggle all rich-content for current room
                 $richContentMessages.each(function (index) {
@@ -1021,7 +1022,7 @@
                         $this.removeAttr('title');
                     }
 
-                    if (!(isCurrentlyVisible ^ enabled)) {
+                    if (isCurrentlyVisible ^ enabled) {
                         $this.trigger('click');
                     }
                 });
@@ -1096,29 +1097,34 @@
             $help.click(function () {
                 ui.showHelp();
             });
+            
+            $roomFilterInput.bind('input', function () { $lobbyRoomFilterForm.submit(); })
+                .keyup(function () { $lobbyRoomFilterForm.submit(); });
 
-            $closedRoomFilter.click(function () {
+            $closedRoomFilter.click(function() { $lobbyRoomFilterForm.submit(); });
+
+            $lobbyRoomFilterForm.submit(function () {
                 var room = getCurrentRoomElements(),
-                    show = $(this).is(':checked');
+                    $lobbyRoomsLists = $lobbyPrivateRooms.add($lobbyOtherRooms);
 
                 // bounce on any room other than lobby
                 if (!room.isLobby()) {
                     return false;
                 }
 
-                // hide the closed rooms from lobby list
-                if (show) {
-                    room.users.find('.closed').show();
-                } else {
-                    room.users.find('.closed').hide();
-                }
-
-                // clear the search text and update search list
-                ui.$roomFilter.update();
+                // hide all elements except those that match the input / closed filters
+                $lobbyRoomsLists
+                    .find('li:not(.empty)')
+                    .each(function () { filterIndividualRoom($(this)); });
+                
+                $lobbyRoomsLists.find('ul').each(function () {
+                    room.setListState($(this));
+                });
+                return false;
             });
 
             $window.blur(function () {
-                ui.focus = false;
+                focus = false;
                 $ui.trigger(ui.events.blurit);
             });
 
@@ -1126,6 +1132,7 @@
                 // clear unread count in active room
                 var room = getCurrentRoomElements();
                 room.makeActive();
+
                 triggerFocus();
             });
 
@@ -1188,12 +1195,11 @@
                             return getRoomsNames();
 
                         case '/':
-                            var commands = ui.getCommands();
                             return ui.getCommands()
                                          .map(function (cmd) { return cmd.Name + ' '; });
 
                         case ':':
-                            return Emoji.getIcons();
+                            return emoji.getIcons();
                         default:
                             return [];
                     }
@@ -1217,7 +1223,9 @@
                 }
             });
 
-            $newMessage.focus();
+            if (!readOnly) {
+                $newMessage.focus();
+            }
 
             // Make sure we can toast at all
             toast.ensureToast(preferences);
@@ -1225,35 +1233,88 @@
             // Load preferences
             loadPreferences();
 
-            // Initilize liveUpdate plugin for room search
-            ui.$roomFilter = $roomFilterInput.liveUpdate('#userlist-lobby', function ($theListItem) {
-                if ($theListItem.hasClass('closed') && !showClosedRoomsInLobby()) {
+            // Crazy browser hack
+            $hiddenFile[0].style.left = '-800px';
+
+            $clipboardUploadButton.on("click", function () {
+                var name = "clipboard-data",
+                    uploader = {
+                        submitFile: function (connectionId, room) {
+                            $fileConnectionId.val(connectionId);
+
+                            $fileRoom.val(room);
+
+                            //$uploadForm.submit();
+                            $.ajax({
+                                url: '/upload-clipboard',
+                                dataType: 'json',
+                                type: 'POST',
+                                data: {
+                                    file: $clipboardUploadPreview.attr("src"),
+                                    room: room,
+                                    connectionId: connectionId
+                                }
+                            }).done(function (result) {
+                                //remove image from preview
+                                $clipboardUploadPreview.attr("src", "");
+                            });
+
+                            $hiddenFile.val(''); //hide upload dialog
+                        }
+                    };
+
+                ui.addMessage('Uploading \'' + name + '\'.', 'broadcast');
+
+                $ui.trigger(ui.events.fileUploaded, [uploader]);
+                $clipboardUpload.modal('hide');
+            });
+
+            $.imagePaste(function (file) {
+                ui.showClipboardUpload(file);
+            });
+
+            $hiddenFile.change(function () {
+                if (!$hiddenFile.val()) {
                     return;
                 }
 
-                // show it
-                $theListItem.show();
+                var path = $hiddenFile.val(),
+                    slash = path.lastIndexOf('\\'),
+                    name = path.substring(slash + 1),
+                    uploader = {
+                        submitFile: function (connectionId, room) {
+                            $fileConnectionId.val(connectionId);
+
+                            $fileRoom.val(room);
+
+                            $uploadForm.submit();
+
+                            $hiddenFile.val('');
+                        }
+                    };
+
+                ui.addMessage('Uploading \'' + name + '\'.', 'broadcast');
+
+                $ui.trigger(ui.events.fileUploaded, [uploader]);
             });
 
-            // Start cycling the messages once the document has finished loading.
-            cycleMessages();
+            // Configure livestamp to only update every 30s since display granularity is by minute anyway (saves CPU cycles)
+            $.livestamp.interval(30 * 1000);
+
+            setInterval(function () {
+                ui.trimRoomMessageHistory();
+            }, trimRoomHistoryFrequency);
         },
         run: function () {
             $.history.init(function (hash) {
-                if (hash.length && hash[0] == '/') {
-                    hash = hash.substr(1);
-                }
+                var roomName = getRoomNameFromHash(hash);
 
-                var parts = hash.split('/');
-                if (parts[0] === 'rooms') {
-                    var roomName = parts[1];
-
-                    if (ui.setActiveRoom(roomName) === false) {
+                if (roomName) {
+                    if (ui.setActiveRoomCore(roomName) === false && roomName !== 'Lobby') {
                         $ui.trigger(ui.events.openRoom, [roomName]);
                     }
                 }
-            },
-            { unescape: ',/' });
+            });
         },
         setMessage: function (value) {
             $newMessage.val(value);
@@ -1280,7 +1341,8 @@
                  .data('owner', false);
             room.updateUserStatus($user);
         },
-        setActiveRoom: function (roomName) {
+        setActiveRoom: navigateToRoom,
+        setActiveRoomCore: function (roomName) {
             var room = getRoomElements(roomName);
 
             loadRoomPreferences(roomName);
@@ -1293,14 +1355,27 @@
 
             var currentRoom = getCurrentRoomElements();
 
-            if (room.exists() && currentRoom.exists()) {
-                currentRoom.makeInactive();
+            if (room.exists()) {
+                if (currentRoom.exists()) {
+                    currentRoom.makeInactive();
+                    if (currentRoom.isLobby()) {
+                        $lobbyRoomFilterForm.hide();
+                        $roomActions.show();
+                    }
+                }
+
                 triggerFocus();
                 room.makeActive();
 
+                if (room.isLobby()) {
+                    $roomActions.hide();
+                    $lobbyRoomFilterForm.show();
+
+                    room.messages.hide();
+                }
+
                 ui.toggleMessageSection(room.isClosed());
 
-                document.location.hash = '#/rooms/' + roomName;
                 $ui.trigger(ui.events.activeRoomChanged, [roomName]);
                 return true;
             }
@@ -1318,6 +1393,12 @@
             room.close();
         },
         updateLobbyRoomCount: updateLobbyRoomCount,
+        updatePrivateLobbyRooms: function (roomName) {
+            var lobby = getLobby(),
+                $room = lobby.users.find('li[data-name="' + roomName + '"]');
+
+            $room.addClass('locked').appendTo(lobby.owners);
+        },
         updateUnread: function (roomName, isMentioned) {
             var room = roomName ? getRoomElements(roomName) : getCurrentRoomElements();
 
@@ -1373,59 +1454,62 @@
 
             return room.isNearTheEnd();
         },
-        populateLobbyRooms: function (rooms) {
+        setRoomLoading: setRoomLoading,
+        populateLobbyRooms: function (rooms, privateRooms) {
             var lobby = getLobby(),
-                showClosedRooms = $closedRoomFilter.is(':checked'),
-            // sort lobby by room open ascending then count descending
-                sorted = rooms.sort(function (a, b) {
-                    if (a.Closed && !b.Closed) {
-                        return 1;
-                    } else if (b.Closed && !a.Closed) {
-                        return -1;
-                    }
+                i;
+            if (!lobby.isInitialized()) {
 
-                    return a.Count > b.Count ? -1 : 1;
+                // Populate the room cache
+                for (i = 0; i < rooms.length; ++i) {
+                    roomCache[rooms[i].Name.toString().toUpperCase()] = true;
+                }
+
+                for (i = 0; i < privateRooms.length; ++i) {
+                    roomCache[privateRooms[i].Name.toString().toUpperCase()] = true;
+                }
+
+                // sort private lobby rooms
+                var privateSorted = sortRoomList(privateRooms);
+                
+                // sort other lobby rooms but filter out private rooms
+                sortedRoomList = sortRoomList(rooms).filter(function (room) {
+                    return !privateSorted.some(function (allowed) {
+                        return allowed.Name === room.Name;
+                    });
                 });
 
-            lobby.users.empty();
+                lobby.owners.empty();
+                lobby.users.empty();
 
-            $.each(sorted, function () {
-                var $name = $('<span/>').addClass('name')
-                                        .html(this.Name),
-                    $count = $('<span/>').addClass('count')
-                                         .html(' (' + this.Count + ')')
-                                         .data('count', this.Count),
-                    $locked = $('<span/>').addClass('lock'),
-                    $readonly = $('<span/>').addClass('readonly'),
-                    $li = $('<li/>').addClass('room')
-                          .attr('data-room', this.Name)
-                          .data('name', this.Name)
-                          .append($locked)
-                          .append($readonly)
-                          .append($name)
-                          .append($count)
-                          .appendTo(lobby.users);
-
-                if (this.Private) {
-                    $li.addClass('locked');
-                }
-                if (this.Closed) {
-                    $li.addClass('closed');
-                    if (!showClosedRooms) {
-                        $li.hide();
-                    }
+                var listOfPrivateRooms = $('<ul/>');
+                if (privateSorted.length > 0) {
+                    populateLobbyRoomList(privateSorted, templates.lobbyroom, listOfPrivateRooms);
+                    listOfPrivateRooms.children('li').appendTo(lobby.owners);
+                    $lobbyPrivateRooms.show();
+                    $lobbyOtherRooms.find('nav-header').html('Other Rooms');
+                } else {
+                    $lobbyPrivateRooms.hide();
+                    $lobbyOtherRooms.find('nav-header').html('Rooms');
                 }
 
-                roomCache[this.Name.toLowerCase()] = true;
-            });
+                var listOfRooms = $('<ul/>');
+                populateLobbyRoomList(sortedRoomList.splice(0, maxRoomsToLoad), templates.lobbyroom, listOfRooms);
+                lastLoadedRoomIndex = listOfRooms.children('li').length;
+                listOfRooms.children('li').appendTo(lobby.users);
+                if (lastLoadedRoomIndex < sortedRoomList.length) {
+                    $loadMoreRooms.show();
+                }
+                $lobbyOtherRooms.show();
+            }
 
             if (lobby.isActive()) {
                 // update cache of room names
                 $lobbyRoomFilterForm.show();
             }
 
-            ui.$roomFilter.update();
-            $roomFilterInput.val('');
+            // re-filter lists
+            $lobbyRoomFilterForm.submit();
         },
         addUser: function (userViewModel, roomName) {
             var room = getRoomElements(roomName),
@@ -1454,33 +1538,37 @@
         },
         setUserActivity: function (userViewModel) {
             var $user = $('.users').find(getUserClassName(userViewModel.name)),
-                active = $user.data('active');
-
-            var fadeSpeed = 'slow';
-            // If the states match it means they're not changing and the user
-            // is joining a room. In that case, set the fade time to be 1ms.
-            if (userViewModel.active === active) {
-                fadeSpeed = 1;
-            }
+                active = $user.data('active'),
+                $idleSince = $user.find('.idle-since');
 
             if (userViewModel.active === true) {
-                $user.fadeTo(fadeSpeed, 1, function () {
+                if ($user.hasClass('idle')) {
                     $user.removeClass('idle');
-                });
+                    $idleSince.livestamp('destroy');
+                }
             } else {
-                $user.fadeTo(fadeSpeed, 0.5, function () {
+                if (!$user.hasClass('idle')) {
                     $user.addClass('idle');
-                });
+                }
+
+                if (!$idleSince.html()) {
+                    $idleSince.livestamp(userViewModel.lastActive);
+                }
             }
 
             updateNote(userViewModel, $user);
         },
         setUserActive: function ($user) {
+            var $idleSince = $user.find('.idle-since');
             if ($user.data('active') === true) {
                 return false;
             }
             $user.attr('data-active', true);
             $user.data('active', true);
+            $user.removeClass('idle');
+            if ($idleSince.livestamp('isLiveStamp')) {
+                $idleSince.livestamp('destroy');
+            }
             return true;
         },
         setUserInActive: function ($user) {
@@ -1489,6 +1577,7 @@
             }
             $user.attr('data-active', false);
             $user.data('active', false);
+            $user.addClass('idle');
             return true;
         },
         changeUserName: function (oldName, user, roomName) {
@@ -1502,7 +1591,7 @@
             });
             $user.data('name', user.Name);
             $user.attr('data-name', user.Name);
-            room.sortLists();
+            room.sortLists($user);
         },
         changeGravatar: function (user, roomName) {
             var room = getRoomElements(roomName),
@@ -1532,6 +1621,8 @@
 
                     if (owner === true) {
                         room.setListState(room.owners);
+                    } else {
+                        room.setListState(room.activeUsers);
                     }
                 });
         },
@@ -1565,12 +1656,24 @@
 
             $user.data('typing', timeout);
         },
+        setLoadingHistory: function (loadingHistory) {
+            if (loadingHistory) {
+                var room = getCurrentRoomElements();
+                $loadingHistoryIndicator.appendTo(room.messages);
+                $loadingHistoryIndicator.fadeIn('slow');
+            } else {
+                $loadingHistoryIndicator.hide();
+            }
+        },
+        setRoomTrimmable: function (roomName, canTrimMessages) {
+            var room = getRoomElements(roomName);
+            room.setTrimmable(canTrimMessages);
+        },
         prependChatMessages: function (messages, roomName) {
             var room = getRoomElements(roomName),
                 $messages = room.messages,
                 $target = $messages.children().first(),
                 $previousMessage = null,
-                $current = null,
                 previousUser = null,
                 previousTimestamp = new Date().addDays(1); // Tomorrow so we always see a date line
 
@@ -1594,7 +1697,7 @@
             }
 
             // Populate the old messages
-            $.each(messages, function (index) {
+            $.each(messages, function () {
                 processMessage(this, roomName);
 
                 if ($previousMessage) {
@@ -1641,8 +1744,8 @@
                 previousUser = null,
                 previousTimestamp = new Date().addDays(1), // Tomorrow so we always see a date line
                 showUserName = true,
-                $message = null,
-                isMention = message.highlight;
+                isMention = message.highlight,
+                isNotification = message.messageType === 1;
 
             // bounce out of here if the room is closed
             if (room.isClosed()) {
@@ -1660,7 +1763,7 @@
             }
 
             // Determine if we need to show the user name next to the message
-            showUserName = previousUser !== message.name;
+            showUserName = previousUser !== message.name && !isNotification;
             message.showUser = showUserName;
 
             processMessage(message, roomName);
@@ -1678,7 +1781,24 @@
                 room.addSeparator();
             }
 
-            this.appendMessage(templates.message.tmpl(message), room);
+            if (isNotification === true) {
+                var model = {
+                    id: message.id,
+                    content: message.message,
+                    img: message.imageUrl,
+                    source: message.source,
+                    encoded: true
+                };
+
+                ui.addMessage(model, 'postedNotification', roomName);
+            }
+            else {
+                this.appendMessage(templates.message.tmpl(message), room);
+            }
+
+            if (message.htmlContent) {
+                ui.addChatMessageContent(message.id, message.htmlContent, room.getName());
+            }
 
             if (room.isInitialized()) {
                 if (isMention) {
@@ -1687,19 +1807,27 @@
                         ui.notify(true);
                     }
 
-                    if (ui.focus === false && anyRoomPreference('canToast') === true) {
+                    if (focus === false && anyRoomPreference('canToast') === true) {
                         // Only toast if there's no focus (even on mentions)
                         ui.toast(message, true, roomName);
                     }
                 }
                 else {
                     // Only toast if chat isn't focused
-                    if (ui.focus === false) {
+                    if (focus === false) {
                         ui.notifyRoom(roomName);
                         ui.toastRoom(roomName, message);
                     }
                 }
             }
+        },
+        overwriteMessage: function (id, message) {
+            var $message = $('#m-' + id);
+            processMessage(message);
+
+            $message.find('.middle').html(message.message);
+            $message.attr('id', 'm-' + message.id);
+
         },
         replaceMessage: function (message) {
             processMessage(message);
@@ -1711,14 +1839,20 @@
             return $('#m-' + id).length > 0;
         },
         addChatMessageContent: function (id, content, roomName) {
-            var $message = $('#m-' + id);
+            var $message = $('#m-' + id),
+                $middle = $message.find('.middle'),
+                $body = $message.find('.content');
 
             if (shouldCollapseContent(content, roomName)) {
                 content = collapseRichContent(content);
             }
 
-            $(content).appendTo($message.find('.middle'))
-                      .wrap('<p/>');
+            if ($middle.length === 0) {
+                $body.append('<p>' + content + '</p>');
+            }
+            else {
+                $middle.append('<p>' + content + '</p>');
+            }
         },
         addPrivateMessage: function (content, type) {
             var rooms = getAllRoomElements();
@@ -1728,15 +1862,22 @@
                 }
             }
         },
-        prepareNotificationMessage: function (content, type) {
+        prepareNotificationMessage: function (options, type) {
+            if (typeof options === 'string') {
+                options = { content: options, encoded: false };
+            }
+
             var now = new Date(),
-                message = {
-                    message: ui.processContent(content),
-                    type: type,
-                    date: now,
-                    when: now.formatTime(true),
-                    fulldate: now.toLocaleString()
-                };
+            message = {
+                message: options.encoded ? options.content : ui.processContent(options.content),
+                type: type,
+                date: now,
+                when: now.formatTime(true),
+                fulldate: now.toLocaleString(),
+                img: options.img,
+                source: options.source,
+                id: options.id
+            };
 
             return templates.notification.tmpl(message);
         },
@@ -1780,7 +1921,8 @@
                     thisDate = new Date($(newMessage).data('timestamp'));
 
                 if (!lastMessage.length || thisDate.toDate().diffDays(lastDate.toDate())) {
-                    ui.addMessage(thisDate.toLocaleDateString(), 'date-header list-header', room.getName())
+                    var dateDisplay = moment(thisDate);
+                    ui.addMessage(dateDisplay.format('dddd, MMMM Do YYYY'), 'date-header list-header', room.getName())
                       .find('.right').remove(); // remove timestamp on date indicator
                 }
             }
@@ -1792,7 +1934,7 @@
             $(newMessage).appendTo(room.messages);
         },
         hasFocus: function () {
-            return ui.focus;
+            return focus;
         },
         getShortcuts: function () {
             return ui.shortcuts;
@@ -1844,7 +1986,7 @@
         },
         notifyRoom: function (roomName) {
             if (getRoomPreference(roomName, 'hasSound') === true) {
-                $('#noftificationSound')[0].play();
+                $('#notificationSound')[0].play();
             }
         },
         toastRoom: function (roomName, message) {
@@ -1854,7 +1996,7 @@
         },
         notify: function (force) {
             if (getActiveRoomPreference('hasSound') === true || force) {
-                $('#noftificationSound')[0].play();
+                $('#notificationSound')[0].play();
             }
         },
         toast: function (message, force, roomName) {
@@ -1864,6 +2006,15 @@
         },
         setUserName: function (name) {
             ui.name = name;
+        },
+        setUnreadNotifications: function (unreadCount) {
+            if (unreadCount > 0) {
+                $unreadNotificationCount.text(unreadCount);
+                $unreadNotificationCount.show();
+            } else {
+                $unreadNotificationCount.text('');
+                $unreadNotificationCount.hide();
+            }
         },
         getUserName: function () {
             return ui.name;
@@ -1901,6 +2052,11 @@
             });
             $helpPopup.modal();
         },
+        showClipboardUpload: function (file) {
+            //set image url
+            $clipboardUploadPreview.attr("src", file.dataURL);
+            $clipboardUpload.modal();
+        },
         showUpdateUI: function () {
             $updatePopup.modal();
 
@@ -1909,6 +2065,72 @@
                 document.location = document.location.pathname;
             },
             updateTimeout);
+        },
+        showReloadMessageNotification: function () {
+            $reloadMessageNotification.appendTo($chatArea);
+            $reloadMessageNotification.show();
+        },
+        showStatus: function (status, transport) {
+            // Change the status indicator here
+            if (connectionState !== status) {
+                if (popoverTimer) {
+                    clearTimeout(popoverTimer);
+                }
+                connectionState = status;
+                $connectionStatus.popover('destroy');
+                switch (status) {
+                    case 0: // Connected
+                        $connectionStatus.removeClass('reconnecting disconnected');
+                        $connectionStatus.popover(getConnectionStateChangedPopoverOptions('You\'re connected.'));
+                        $connectionStateChangedPopover.find(connectionStateIcon).addClass('icon-ok-sign');
+                        $connectionStatus.popover('show');
+                        popoverTimer = setTimeout(function () {
+                            $connectionStatus.popover('destroy');
+                            ui.initializeConnectionStatus(transport);
+                            popoverTimer = null;
+                        }, 2000);
+                        break;
+                    case 1: // Reconnecting
+                        $connectionStatus.removeClass('disconnected').addClass('reconnecting');
+                        $connectionStatus.popover(getConnectionStateChangedPopoverOptions('The connection to JabbR has been temporarily lost, trying to reconnect.'));
+                        $connectionStateChangedPopover.find(connectionStateIcon).addClass('icon-question-sign');
+                        $connectionStatus.popover('show');
+                        popoverTimer = setTimeout(function () {
+                            $connectionStatus.popover('hide');
+                            popoverTimer = null;
+                        }, 5000);
+                        break;
+                    case 2: // Disconnected
+                        $connectionStatus.removeClass('reconnecting').addClass('disconnected');
+                        $connectionStatus.popover(getConnectionStateChangedPopoverOptions('The connection to JabbR has been lost, trying to reconnect.'));
+                        $connectionStateChangedPopover.find(connectionStateIcon).addClass('icon-exclamation-sign');
+                        $connectionStatus.popover('show');
+                        popoverTimer = setTimeout(function () {
+                            $connectionStatus.popover('hide');
+                            popoverTimer = null;
+                        }, 5000);
+                        break;
+                }
+            }
+        },
+        setReadOnly: function (isReadOnly) {
+            readOnly = isReadOnly;
+
+            if (readOnly === true) {
+                $hiddenFile.attr('disabled', 'disabled');
+                $submitButton.attr('disabled', 'disabled');
+                $newMessage.attr('disabled', 'disabled');
+                $fileUploadButton.attr('disabled', 'disabled');
+            }
+            else {
+                $hiddenFile.removeAttr('disabled');
+                $submitButton.removeAttr('disabled');
+                $newMessage.removeAttr('disabled');
+                $fileUploadButton.removeAttr('disabled');
+            }
+        },
+        initializeConnectionStatus: function (transport) {
+            $connectionStatus.popover(getConnectionInfoPopoverOptions(transport));
         },
         changeNote: function (userViewModel, roomName) {
             var room = getRoomElements(roomName),
@@ -1967,11 +2189,12 @@
         collapseRichContent: collapseRichContent,
         toggleMessageSection: function (disabledIt) {
             if (disabledIt) {
-                // disable button and textarea
+                // disable send button, textarea and file upload
                 $newMessage.attr('disabled', 'disabled');
                 $submitButton.attr('disabled', 'disabled');
-
-            } else {
+                $fileUploadButton.attr('disabled', 'disabled');
+                $hiddenFile.attr('disabled', 'disabled');
+            } else if (!readOnly) {
                 // re-enable textarea button
                 $newMessage.attr('disabled', '');
                 $newMessage.removeAttr('disabled');
@@ -1979,6 +2202,12 @@
                 // re-enable submit button
                 $submitButton.attr('disabled', '');
                 $submitButton.removeAttr('disabled');
+
+                // re-enable file upload button
+                $fileUploadButton.attr('disabled', '');
+                $fileUploadButton.removeAttr('disabled');
+                $hiddenFile.attr('disabled', '');
+                $hiddenFile.removeAttr('disabled');
             }
         },
         closeRoom: function (roomName) {
@@ -1996,40 +2225,13 @@
             room.setListState(room.owners);
         },
         processContent: function (content) {
-            var hasNewline = content.indexOf('\n') != -1;
-            
-            if (hasNewline) {
-                // Multiline detection
-                return templates.multiline.tmpl({ content: content }).html();
-            }
-            else {
-                // Emoji
-                content = utility.parseEmojis(content);
+            return utility.processContent(content, templates, roomCache);
+        },
+        trimRoomMessageHistory: function (roomName) {
+            var rooms = roomName ? [getRoomElements(roomName)] : getAllRoomElements();
 
-                // Html encode
-                content = utility.encodeHtml(content);
-
-                // Transform emoji to html
-                content = utility.transformEmojis(content);
-
-                // Create rooms links
-                content = content.replace(/#([A-Za-z0-9-_]{1,30}\w*)/g, function (m) {
-                    var roomName = m.substr(1);
-
-                    if (roomCache[roomName.toLowerCase()]) {
-                        return '<a href="#/rooms/' + roomName + '" title="' + roomName + '">' + m + '</a>';
-                    }
-                    return m;
-                });
-
-                // Convert normal links
-                content = linkify(content, {
-                    callback: function (text, href) {
-                        return href ? '<a rel="nofollow external" target="_blank" href="' + href + '" title="' + href + '">' + text + '</a>' : text;
-                    }
-                });
-
-                return content;
+            for (var i = 0; i < rooms.length; i++) {
+                rooms[i].trimHistory();
             }
         }
     };
@@ -2038,4 +2240,4 @@
         window.chat = {};
     }
     window.chat.ui = ui;
-})(jQuery, window, window.document, window.chat.utility);
+})(jQuery, window, window.document, window.chat, window.chat.utility, window.Emoji, window.linkify);

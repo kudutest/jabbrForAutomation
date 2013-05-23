@@ -1,22 +1,27 @@
 ﻿using System;
+using System.Linq;
 using JabbR.ContentProviders.Core;
 using JabbR.Infrastructure;
 using JabbR.Models;
 using JabbR.Nancy;
 using JabbR.Services;
+using JabbR.UploadHandlers;
 using Microsoft.AspNet.SignalR.Hubs;
 using Microsoft.AspNet.SignalR.Json;
+using Microsoft.Owin.Security.DataProtection;
+using Microsoft.Owin.Security.Forms;
 using Nancy.Authentication.WorldDomination;
 using Nancy.Bootstrappers.Ninject;
 using Newtonsoft.Json;
 using Ninject;
+using Ninject.Extensions;
 using WorldDomination.Web.Authentication;
 
 namespace JabbR
 {
     public partial class Startup
     {
-        private static KernelBase SetupNinject(ApplicationSettings settings)
+        private static KernelBase SetupNinject(IJabbrConfiguration configuration)
         {
             var kernel = new StandardKernel(new[] { new FactoryModule() });
 
@@ -29,36 +34,43 @@ namespace JabbR
             kernel.Bind<IChatService>()
                   .To<ChatService>();
 
-            kernel.Bind<IAuthenticationTokenService>()
-                  .To<AuthenticationTokenService>();
+            kernel.Bind<IDataProtector>()
+                  .To<JabbRDataProtection>();
+
+            kernel.Bind<IFormsAuthenticationProvider>()
+                  .To<JabbRFormsAuthenticationProvider>();
+
+            kernel.Bind<ILogger>()
+                  .To<RealtimeLogger>();
+
+            kernel.Bind<IJabbrConfiguration>()
+                  .ToConstant(configuration);
 
             // We're doing this manually since we want the chat repository to be shared
             // between the chat service and the chat hub itself
             kernel.Bind<Chat>()
                   .ToMethod(context =>
                   {
-                      var resourceProcessor = context.Kernel.Get<IResourceProcessor>();
+                      var resourceProcessor = context.Kernel.Get<ContentProviderProcessor>();
                       var repository = context.Kernel.Get<IJabbrRepository>();
                       var cache = context.Kernel.Get<ICache>();
+                      var logger = context.Kernel.Get<ILogger>();
+                      var settings = context.Kernel.Get<ApplicationSettings>();
 
-                      var service = new ChatService(cache, repository);
+                      var service = new ChatService(cache, repository, settings);
 
                       return new Chat(resourceProcessor,
                                       service,
                                       repository,
-                                      cache);
+                                      cache,
+                                      logger);
                   });
 
             kernel.Bind<ICryptoService>()
-                .To<CryptoService>()
-                .InSingletonScope();
+                .To<CryptoService>();
 
             kernel.Bind<IResourceProcessor>()
-                .To<ResourceProcessor>()
-                .InSingletonScope();
-
-            kernel.Bind<IApplicationSettings>()
-                  .ToConstant(settings);
+                .ToConstant(new ResourceProcessor(kernel));
 
             kernel.Bind<IJavaScriptMinifier>()
                   .To<AjaxMinMinifier>()
@@ -66,6 +78,18 @@ namespace JabbR
 
             kernel.Bind<IMembershipService>()
                   .To<MembershipService>();
+
+            kernel.Bind<ApplicationSettings>()
+                  .ToMethod(context =>
+                  {
+                      return context.Kernel.Get<ISettingsManager>().Load();
+                  });
+
+            kernel.Bind<ISettingsManager>()
+                  .To<SettingsManager>();
+
+            kernel.Bind<IUserAuthenticator>()
+                  .To<DefaultUserAuthenticator>();
 
             kernel.Bind<IAuthenticationService>()
                   .ToConstant(new AuthenticationService());
@@ -80,26 +104,26 @@ namespace JabbR
             kernel.Bind<IChatNotificationService>()
                   .To<ChatNotificationService>();
 
-            if (String.IsNullOrEmpty(settings.VerificationKey) ||
-                String.IsNullOrEmpty(settings.EncryptionKey))
-            {
-                kernel.Bind<IKeyProvider>()
-                      .ToConstant(new FileBasedKeyProvider());
-            }
-            else
-            {
-                kernel.Bind<IKeyProvider>()
-                      .To<AppSettingKeyProvider>()
-                      .InSingletonScope();
-            }
+            kernel.Bind<IKeyProvider>()
+                      .To<SettingsKeyProvider>();
 
-            var serializer = new JsonNetSerializer(new JsonSerializerSettings()
+            var serializer = JsonSerializer.Create(new JsonSerializerSettings()
             {
-                DateFormatHandling = DateFormatHandling.MicrosoftDateFormat
+                DateFormatHandling = DateFormatHandling.IsoDateFormat
             });
 
-            kernel.Bind<IJsonSerializer>()
+            kernel.Bind<JsonSerializer>()
                   .ToConstant(serializer);
+
+            kernel.Bind<UploadCallbackHandler>()
+                  .ToSelf()
+                  .InSingletonScope();
+
+            kernel.Bind<UploadProcessor>()
+                  .ToConstant(new UploadProcessor(kernel));
+
+            kernel.Bind<ContentProviderProcessor>()
+                  .ToConstant(new ContentProviderProcessor(kernel));
 
             return kernel;
         }

@@ -2,6 +2,7 @@
 /// <reference path="Scripts/jQuery.tmpl.js" />
 /// <reference path="Scripts/jquery.cookie.js" />
 /// <reference path="Chat.ui.js" />
+/// <reference path="Scripts/moment.min.js" />
 
 (function ($, connection, window, ui, utility) {
     "use strict";
@@ -12,14 +13,21 @@
         originalTitle = document.title,
         unread = 0,
         isUnreadMessageForUser = false,
-        focus = true,
         loadingHistory = false,
         checkingStatus = false,
         typing = false,
-        typingTimeoutId = null,
         $ui = $(ui),
         messageSendingDelay = 1500,
-        pendingMessages = {};
+        pendingMessages = {},
+        privateRooms = null;
+
+    function failPendingMessages() {
+        for (var id in pendingMessages) {
+            clearTimeout(pendingMessages[id]);
+            ui.failMessage(id);
+            delete pendingMessages[id];
+        }
+    }
 
     function isSelf(user) {
         return chat.state.name === user.Name;
@@ -71,9 +79,14 @@
 
     function populateRoom(room) {
         var d = $.Deferred();
+
+        connection.hub.log('getRoomInfo(' + room + ')');
+
         // Populate the list of users rooms and messages 
         chat.server.getRoomInfo(room)
                 .done(function (roomInfo) {
+                    connection.hub.log('getRoomInfo.done(' + room + ')');
+
                     $.each(roomInfo.Users, function () {
                         var userViewModel = getUserViewModel(this);
                         ui.addUser(userViewModel, room);
@@ -106,7 +119,8 @@
                     // may be appended if we are just joining the room
                     ui.watchMessageScroll(messageIds, room);
                 })
-                .fail(function () {
+                .fail(function (e) {
+                    connection.hub.log('getRoomInfo.failed(' + room + ', ' + e + ')');
                     d.rejectWith(chat);
                 });
 
@@ -114,11 +128,17 @@
     }
 
     function populateLobbyRooms() {
-        // Populate the user list with room names
-        chat.server.getRooms()
-            .done(function (rooms) {
-                ui.populateLobbyRooms(rooms);
-            });
+        try {
+            // Populate the user list with room names
+            chat.server.getRooms()
+                .done(function (rooms) {
+                    ui.populateLobbyRooms(rooms, privateRooms);
+                    ui.setInitialized('Lobby');
+                });
+        }
+        catch (e) {
+            connection.hub.log('getRooms failed');
+        }
     }
 
     function scrollIfNecessary(callback, room) {
@@ -155,10 +175,15 @@
             name: message.User.Name,
             hash: message.User.Hash,
             message: message.HtmlEncoded ? message.Content : ui.processContent(message.Content),
+            htmlContent: message.HtmlContent,
             id: message.Id,
             date: message.When.fromJsonDate(),
             highlight: re.test(message.Content) ? 'highlight' : '',
-            isOwn: re.test(message.User.name)
+            isOwn: re.test(message.User.name),
+            isMine: message.User.Name === chat.state.name,
+            imageUrl: message.ImageUrl,
+            source: message.Source,
+            messageType: message.MessageType
         };
     }
 
@@ -174,16 +199,24 @@
     }
 
     function updateTitle() {
-        if (unread === 0) {
-            document.title = originalTitle;
-        }
-        else {
-            document.title = (isUnreadMessageForUser ? '*' : '') + '(' + unread + ') ' + originalTitle;
-        }
+        // ugly hack via http://stackoverflow.com/a/2952386/188039
+        setTimeout(function () {
+            if (unread === 0) {
+                document.title = originalTitle;
+            } else {
+                document.title = (isUnreadMessageForUser ? '*' : '') + '(' + unread + ') ' + originalTitle;
+            }
+        }, 200);
+    }
+
+    function clearUnread() {
+        isUnreadMessageForUser = false;
+        unread = 0;
+        updateUnread(chat.state.activeRoom, false);
     }
 
     function updateUnread(room, isMentioned) {
-        if (focus === false) {
+        if (ui.hasFocus() === false) {
             isUnreadMessageForUser = (isUnreadMessageForUser || isMentioned);
 
             unread = unread + 1;
@@ -203,7 +236,9 @@
     // When the /join command gets raised this is called
     chat.client.joinRoom = function (room) {
         var added = ui.addRoom(room);
+
         ui.setActiveRoom(room.Name);
+
         if (room.Private) {
             ui.setRoomLocked(room.Name);
         }
@@ -223,15 +258,16 @@
     };
 
     // Called when a returning users join chat
-    chat.client.logOn = function (rooms) {
-        var activeRoom = this.state.activeRoom,
-            loadRooms = function () {
-                $.each(rooms, function (index, room) {
-                    if (chat.state.activeRoom !== room.Name) {
-                        populateRoom(room.Name);
-                    }
-                });
-            };
+    chat.client.logOn = function (rooms, myRooms) {
+        privateRooms = myRooms;
+
+        var loadRooms = function () {
+            $.each(rooms, function (index, room) {
+                if (chat.state.activeRoom !== room.Name) {
+                    populateRoom(room.Name);
+                }
+            });
+        };
 
         $.each(rooms, function (index, room) {
             ui.addRoom(room);
@@ -243,19 +279,18 @@
             }
         });
         ui.setUserName(chat.state.name);
-        ui.addMessage('Welcome back ' + chat.state.name, 'notification', 'lobby');
-        ui.addMessage('You can join any of the rooms on the right', 'notification', 'lobby');
-        ui.addMessage('Type /logout to log out of chat', 'notification', 'lobby');
+        ui.setUnreadNotifications(chat.state.unreadNotifications);
 
         // Process any urls that may contain room names
         ui.run();
 
-        // If the active room didn't change then set the active room (since no navigation happened)
-        if (activeRoom === this.state.activeRoom) {
-            ui.setActiveRoom(this.state.activeRoom || 'Lobby');
-        }
+        // Otherwise set the active room
+        ui.setActiveRoom(this.state.activeRoom || 'Lobby');
 
         if (this.state.activeRoom) {
+            // Populate lobby rooms for intellisense
+            populateLobbyRooms();
+
             // Always populate the active room first then load the other rooms so it looks fast :)
             populateRoom(this.state.activeRoom).done(loadRooms);
         }
@@ -275,6 +310,7 @@
         }
 
         ui.setRoomLocked(room);
+        ui.updatePrivateLobbyRooms(room);
     };
 
     // Called when this user locked a room
@@ -283,7 +319,6 @@
     };
 
     chat.client.roomClosed = function (room) {
-        populateLobbyRooms();
         ui.addMessage('Room \'' + room + '\' is now closed', 'notification', this.state.activeRoom);
 
         ui.closeRoom(room);
@@ -294,7 +329,6 @@
     };
 
     chat.client.roomUnClosed = function (room) {
-        populateLobbyRooms();
         ui.addMessage('Room \'' + room + '\' is now open', 'notification', this.state.activeRoom);
 
         ui.unCloseRoom(room);
@@ -312,7 +346,7 @@
         ui.clearRoomOwner(user.Name, room);
     };
 
-    chat.updateRoomCount = function (room, count) {
+    chat.client.updateRoomCount = function (room, count) {
         ui.updateLobbyRoomCount(room, count);
     };
 
@@ -336,6 +370,22 @@
         updateUnread(room, false /* isMentioned: this is outside normal messages and user shouldn't be mentioned */);
 
         ui.watchMessageScroll([id], room);
+    };
+
+    chat.client.replaceMessage = function (id, message, room) {
+        ui.confirmMessage(id);
+
+        var viewModel = getMessageViewModel(message);
+
+        scrollIfNecessary(function () {
+
+            // Update your message when it comes from the server
+            ui.overwriteMessage(id, viewModel);
+        }, room);
+
+        var isMentioned = viewModel.highlight === 'highlight';
+
+        updateUnread(room, isMentioned);
     };
 
     chat.client.addMessage = function (message, room) {
@@ -430,21 +480,8 @@
         ui.addMessage(msg, 'notification', room);
     };
 
-    // Called when you created a new user
-    chat.client.userCreated = function () {
-        ui.setUserName(this.state.name);
-        ui.addMessage('Your nick is ' + this.state.name, 'notification');
-
-        // Process any urls that may contain room names
-        ui.run();
-
-        if (!this.state.activeRoom) {
-            // Set the active room to the lobby so the rooms on the right load
-            ui.setActiveRoom('Lobby');
-        }
-
-        // Update the cookie
-        updateCookie();
+    chat.client.postMessage = function (msg, type, room) {
+        ui.addMessage(msg, type, room);
     };
 
     chat.client.forceUpdate = function () {
@@ -455,7 +492,7 @@
         var lastActivityDate = userInfo.LastActivity.fromJsonDate();
         var status = "Currently " + userInfo.Status;
         if (userInfo.IsAfk) {
-            status += userInfo.Status == 'Active' ? ' but ' : ' and ';
+            status += userInfo.Status === 'Active' ? ' but ' : ' and ';
             status += ' is Afk';
         }
         ui.addMessage('User information for ' + userInfo.Name +
@@ -627,7 +664,6 @@
         if (isSelf(user)) {
             ui.setActiveRoom('Lobby');
             ui.removeRoom(room);
-            ui.addMessage('You have left ' + room, 'notification');
         }
         else {
             ui.removeUser(user, room);
@@ -648,9 +684,21 @@
             ui.addMessage('No rooms available', 'list-item');
         }
         else {
-            // sort rooms by count descending
+            // sort rooms by count descending then name
             var sorted = rooms.sort(function (a, b) {
-                return a.Count > b.Count ? -1 : 1;
+                if (a.Closed && !b.Closed) {
+                    return 1;
+                } else if (b.Closed && !a.Closed) {
+                    return -1;
+                }
+
+                if (a.Count > b.Count) {
+                    return -1;
+                } else if (b.Count > a.Count) {
+                    return 1;
+                }
+                
+                return a.Name.toString().toUpperCase().localeCompare(b.Name.toString().toUpperCase());
             });
 
             $.each(sorted, function () {
@@ -681,6 +729,19 @@
         }
         else {
             ui.addMessage('The following users match your search', 'list-header');
+            ui.addMessage(users.join(', '), 'list-item');
+        }
+    };
+    
+    chat.client.listAllowedUsers = function (room, isPrivate, users) {
+        if (!isPrivate) {
+            ui.addMessage('Anyone is allowed in ' + room + ' as it is not private', 'list-header');
+        }
+        else if (users.length === 0) {
+            ui.addMessage('No users are allowed in ' + room, 'list-header');
+        }
+        else {
+            ui.addMessage('The following users are allowed in ' + room, 'list-header');
             ui.addMessage(users.join(', '), 'list-item');
         }
     };
@@ -737,6 +798,14 @@
         ui.addMessage('ADMIN: ' + message, 'broadcast', room);
     };
 
+    chat.client.outOfSync = function () {
+        ui.showUpdateUI();
+    };
+
+    chat.client.updateUnreadNotifications = function (read) {
+        ui.setUnreadNotifications(read);
+    };
+
     $ui.bind(ui.events.typing, function () {
         // If not in a room, don't try to send typing notifications
         if (!chat.state.activeRoom) {
@@ -747,6 +816,7 @@
             typing = true;
 
             try {
+                ui.setRoomTrimmable(chat.state.activeRoom, typing);
                 chat.server.typing(chat.state.activeRoom);
             }
             catch (e) {
@@ -760,7 +830,13 @@
         }
     });
 
+    $ui.bind(ui.events.fileUploaded, function (ev, uploader) {
+        uploader.submitFile(connection.hub.id, chat.state.activeRoom);
+    });
+
     $ui.bind(ui.events.sendMessage, function (ev, msg) {
+        clearUnread();
+
         var id = utility.newId(),
             clientMessage = {
                 id: id,
@@ -768,7 +844,6 @@
                 room: chat.state.activeRoom
             },
             messageCompleteTimeout = null;
-
 
         if (msg[0] !== '/') {
 
@@ -785,7 +860,8 @@
                 message: ui.processContent(clientMessage.content),
                 id: clientMessage.id,
                 date: new Date(),
-                highlight: ''
+                highlight: '',
+                isMine: true
             };
 
             ui.addChatMessage(viewModel, clientMessage.room);
@@ -793,8 +869,13 @@
             // If there's a significant delay in getting the message sent
             // mark it as pending
             messageCompleteTimeout = window.setTimeout(function () {
-                // If after a second
-                ui.markMessagePending(id);
+                if ($.connection.hub.state === $.connection.connectionState.reconnecting) {
+                    ui.failMessage(id);
+                }
+                else {
+                    // If after a second
+                    ui.markMessagePending(id);
+                }
             },
             messageSendingDelay);
 
@@ -803,11 +884,7 @@
 
         try {
             chat.server.send(clientMessage)
-                .done(function (requiresUpdate) {
-                    if (requiresUpdate === true) {
-                        ui.showUpdateUI();
-                    }
-
+                .done(function () {
                     if (messageCompleteTimeout) {
                         clearTimeout(messageCompleteTimeout);
                         delete pendingMessages[id];
@@ -816,6 +893,7 @@
                     ui.confirmMessage(id);
                 })
                 .fail(function (e) {
+                    ui.failMessage(id);
                     ui.addMessage(e, 'error');
                 });
         }
@@ -834,31 +912,44 @@
     });
 
     $ui.bind(ui.events.focusit, function () {
-        isUnreadMessageForUser = false;
-        focus = true;
-        unread = 0;
-        updateTitle();
+        clearUnread();
+
+        try {
+            chat.server.updateActivity();
+        }
+        catch (e) {
+            connection.hub.log('updateActivity failed');
+        }
     });
 
     $ui.bind(ui.events.blurit, function () {
-        focus = false;
-
         updateTitle();
     });
 
     $ui.bind(ui.events.openRoom, function (ev, room) {
-        chat.server.send('/join ' + room, chat.state.activeRoom)
-            .fail(function (e) {
-                ui.setActiveRoom('Lobby');
-                ui.addMessage(e, 'error');
-            });
+        try {
+            chat.server.send('/join ' + room, chat.state.activeRoom)
+                .fail(function (e) {
+                    ui.setActiveRoom('Lobby');
+                    ui.addMessage(e, 'error');
+                });
+        }
+        catch (e) {
+            connection.hub.log('openRoom failed');
+        }
     });
 
     $ui.bind(ui.events.closeRoom, function (ev, room) {
-        chat.server.send('/leave ' + room, chat.state.activeRoom)
-            .fail(function (e) {
-                ui.addMessage(e, 'error');
-            });
+        try {
+            chat.server.send('/leave ' + room, chat.state.activeRoom)
+                .fail(function (e) {
+                    ui.addMessage(e, 'error');
+                });
+        }
+        catch (e) {
+            // This can fail if the server is offline
+            connection.hub.log('closeRoom room failed');
+        }
     });
 
     $ui.bind(ui.events.prevMessage, function () {
@@ -898,15 +989,35 @@
 
         loadingHistory = true;
 
-        // TODO: Show a little animation so the user experience looks fancy
-        chat.server.getPreviousMessages(roomInfo.messageId)
-            .done(function (messages) {
-                ui.prependChatMessages($.map(messages, getMessageViewModel), roomInfo.name);
-                loadingHistory = false;
-            })
-            .fail(function () {
-                loadingHistory = false;
-            });
+        try {
+            // Show a little animation so the user experience looks fancy
+            ui.setLoadingHistory(true);
+
+            ui.setRoomTrimmable(roomInfo.name, false);
+            connection.hub.log('getPreviousMessages(' + roomInfo.name + ')');
+            chat.server.getPreviousMessages(roomInfo.messageId)
+                .done(function (messages) {
+                    connection.hub.log('getPreviousMessages.done(' + roomInfo.name + ')');
+                    ui.prependChatMessages($.map(messages, getMessageViewModel), roomInfo.name);
+                    loadingHistory = false;
+
+                    ui.setLoadingHistory(false);
+                })
+                .fail(function (e) {
+                    connection.hub.log('getPreviousMessages.failed(' + roomInfo.name + ', ' + e + ')');
+                    loadingHistory = false;
+
+                    ui.setLoadingHistory(false);
+                });
+        }
+        catch (e) {
+            connection.hub.log('getPreviousMessages failed');
+            ui.setLoadingHistory(false);
+        }
+    });
+
+    $(ui).bind(ui.events.reloadMessages, function () {
+
     });
 
     $(ui).bind(ui.events.preferencesChanged, function (ev) {
@@ -919,7 +1030,8 @@
 
     $(function () {
         var stateCookie = $.cookie('jabbr.state'),
-            state = stateCookie ? JSON.parse(stateCookie) : {};
+            state = stateCookie ? JSON.parse(stateCookie) : {},
+            initial = true;
 
         // Initialize the ui, passing the user preferences
         ui.initialize(state.preferences);
@@ -937,64 +1049,74 @@
             }
 
             connection.hub.logging = logging;
-            connection.hub.start(options, function () {
-                chat.server.join()
-                .fail(function (e) {
-                    // So refresh the page, our auth token is probably gone
-                    document.location = document.location.pathname;
-                })
-                .done(function () {
-                    // get list of available commands
-                    chat.server.getCommands()
-                        .done(function (commands) {
-                            ui.setCommands(commands);
-                        });
+            connection.hub.qs = "version=" + window.jabbrVersion;
+            connection.hub.start(options)
+                          .done(function () {
+                              chat.server.join()
+                              .fail(function (e) {
+                                  // So refresh the page, our auth token is probably gone
+                                  performLogout();
+                              })
+                              .done(function () {
+                                  // get list of available commands
+                                  chat.server.getCommands()
+                                      .done(function (commands) {
+                                          ui.setCommands(commands);
+                                      });
 
-                    // get list of available shortcuts
-                    chat.server.getShortcuts()
-                        .done(function (shortcuts) {
-                            ui.setShortcuts(shortcuts);
-                        });
+                                  // get list of available shortcuts
+                                  chat.server.getShortcuts()
+                                      .done(function (shortcuts) {
+                                          ui.setShortcuts(shortcuts);
+                                      });
+                              });
+                          });
 
-                    // populate the lobby rooms
-                    populateLobbyRooms();
-                });
-            });
+            connection.hub.stateChanged(function (change) {
+                if (change.newState === $.connection.connectionState.reconnecting) {
+                    failPendingMessages();
 
-            connection.hub.reconnected(function () {
-                if (checkingStatus === true) {
-                    return;
+                    ui.showStatus(1, '');
                 }
+                else if (change.newState === $.connection.connectionState.connected) {
+                    if (!initial) {
+                        ui.showStatus(0, $.connection.hub.transport.name);
+                        ui.setReadOnly(false);
+                    } else {
+                        ui.initializeConnectionStatus($.connection.hub.transport.name);
+                    }
 
-                checkingStatus = true;
-
-                chat.server.checkStatus()
-                    .done(function (requiresUpdate) {
-                        if (requiresUpdate === true) {
-                            ui.showUpdateUI();
-                        }
-                    })
-                    .always(function () {
-                        checkingStatus = false;
-                    });
+                    initial = false;
+                }
             });
 
             connection.hub.disconnected(function () {
                 connection.hub.log('Dropped the connection from the server. Restarting in 5 seconds.');
 
+                failPendingMessages();
+
+                ui.showStatus(2, '');
+                ui.setReadOnly(true);
+
                 // Restart the connection
                 setTimeout(function () {
-                    connection.hub.start();
+                    connection.hub.start(options)
+                                  .done(function () {
+                                      // When this works uncomment it.
+                                      // ui.showReloadMessageNotification();
+
+                                      // Turn the firehose back on
+                                      chat.server.join(true).fail(function (e) {
+                                          // So refresh the page, our auth token is probably gone
+                                          performLogout();
+                                      });
+                                  });
                 }, 5000);
             });
 
             connection.hub.error(function (err) {
-                // Make all pening messages failed if there's an error
-                for (var id in pendingMessages) {
-                    clearTimeout(pendingMessages[id]);
-                    ui.failMessage(id);
-                    delete pendingMessages[id];
-                }
+                // Make all pending messages failed if there's an error
+                failPendingMessages();
             });
         }
 

@@ -8,14 +8,13 @@ namespace JabbR.ViewModels
 {
     public class LoginViewModel
     {
-        public LoginViewModel(AuthenticationMode authMode, IEnumerable<IAuthenticationProvider> configuredProviders, IEnumerable<ChatUserIdentity> userIdentities)
+        public LoginViewModel(ApplicationSettings settings, IEnumerable<IAuthenticationProvider> configuredProviders, IEnumerable<ChatUserIdentity> userIdentities)
         {
-            AuthenticationMode = authMode;
             SocialDetails = new SocialLoginViewModel(configuredProviders, userIdentities);
+            AllowUserRegistration = settings.AllowUserRegistration;
         }
 
-        public AuthenticationMode AuthenticationMode { get; private set; }
-
+        public bool AllowUserRegistration { get; set; }
         public SocialLoginViewModel SocialDetails { get; private set; }
     }
 }

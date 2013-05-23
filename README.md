@@ -1,25 +1,10 @@
-## JabbR
+## JabbR [![Build Status](https://travis-ci.org/davidfowl/JabbR.png)](https://travis-ci.org/davidfowl/JabbR)
 JabbR is a chat application built with ASP.NET using SignalR. 
 
-## Contributing
-Before you contribute anything make sure you set autoclrf to true.
-
-
-    git config --local core.autocrlf true
-
-### Coding Guidelines
-A few more things:
-
-* Sort your usings
-* Spaces not tabs (I won't even look at the PR if you use tabs)
-* Follow the **existing** conventions you see in the project (that means, brace style, formatting etc).
-* If you aren't sure about something, ask in the [meta](http://jabbr.net/#/rooms/meta) room on jabbr.
+![jabbr.net](https://jabbr.blob.core.windows.net/jabbr-uploads/Screen%20Shot%202013-04-01%20at%207.57.53%20PM_d6a3.png)
 
 ### Features and Bugs
-After deciding you want to work on a feature or bug, comment on that issue saying that you want to do it. If you want to
-discuss the feature further, join the [meta](http://jabbr.net/#/rooms/meta) room on jabbr. 
-
-**NOTE:** It's important that you indicate that you want to work on a issue so that there's no overlapping work being done.
+If you want to discuss the features join discussion in the [meta](http://jabbr.net/#/rooms/meta) room on jabbr. 
 
 ## JabbR Features and Commands
     
@@ -46,8 +31,11 @@ Assign a gravatar to your nick. Be recognized, even in JabbR!
 Inline image and content support for your favorite sites:
 
 * CollegeHumor
-* GitHub 
+* GitHub Issues
+* NuGet Packages
+* GISTs
 * Google Docs
+* Google Maps
 * imgur
 * join.me
 * NerdDinner
@@ -57,6 +45,12 @@ Inline image and content support for your favorite sites:
 * UStream
 * Vimeo
 * Youtube
+* BBC News
+* SoundCloud
+* MixCloud
+* Spotify
+* Twitter
+* Uservoice
 
 #### And if you ever happen to get lost...
     Type /? - to show the full list of JabbR Commands

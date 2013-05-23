@@ -11,17 +11,28 @@ namespace JabbR.Services
         private readonly ICollection<ChatUser> _users;
         private readonly ICollection<ChatUserIdentity> _identities;
         private readonly ICollection<ChatRoom> _rooms;
+        private readonly ICollection<Attachment> _attachments;
+        private readonly ICollection<Notification> _notifications;
 
         public InMemoryRepository()
         {
             _users = new SafeCollection<ChatUser>();
             _rooms = new SafeCollection<ChatRoom>();
             _identities = new SafeCollection<ChatUserIdentity>();
+            _attachments = new SafeCollection<Attachment>();
+            _notifications = new SafeCollection<Notification>();
         }
 
         public IQueryable<ChatRoom> Rooms { get { return _rooms.AsQueryable(); } }
 
         public IQueryable<ChatUser> Users { get { return _users.AsQueryable(); } }
+
+        public IQueryable<ChatClient> Clients { get { return _users.SelectMany(u => u.ConnectedClients).AsQueryable(); } }
+
+        public void Add(Attachment attachment)
+        {
+            _attachments.Add(attachment);   
+        }
 
         public void Add(ChatRoom room)
         {
@@ -55,6 +66,11 @@ namespace JabbR.Services
             user.ConnectedClients.Add(client);
         }
 
+        public void Add(Notification notification)
+        {
+            _notifications.Add(notification);
+        }
+
         public void Remove(ChatClient client)
         {
             var user = _users.FirstOrDefault(u => client.User == u);
@@ -74,6 +90,11 @@ namespace JabbR.Services
         public void Remove(ChatUserIdentity identity)
         {
             _identities.Remove(identity);
+        }
+
+        public void Remove(Notification notification)
+        {
+            _notifications.Remove(notification);
         }
 
         public void CommitChanges()
@@ -119,6 +140,11 @@ namespace JabbR.Services
                 .AsQueryable();
         }
 
+        public IQueryable<Notification> GetNotificationsByUser(ChatUser user)
+        {
+            return _notifications.Where(n => n.UserKey == user.Key).AsQueryable();
+        }
+
         public IQueryable<ChatMessage> GetMessagesByRoom(ChatRoom room)
         {
             return room.Messages.AsQueryable();
@@ -161,6 +187,11 @@ namespace JabbR.Services
             return null;
         }
 
+        public Notification GetNotificationById(int notificationId)
+        {
+            return _notifications.SingleOrDefault(n => n.Key == notificationId);
+        }
+
         public ChatClient GetClientById(string clientId, bool includeUser = false)
         {
             return _users.SelectMany(u => u.ConnectedClients).FirstOrDefault(c => c.Id == clientId);
@@ -178,13 +209,7 @@ namespace JabbR.Services
                     select m).AsQueryable();
         }
 
-        public void RemoveAllClients()
-        {
-            // No need to do anything here since this is only called on App_Start
-            // if we're using the in memory repository all the data has been purged anyways
-        }
-
-        public ChatMessage GetMessagesById(string id)
+        public ChatMessage GetMessageById(string id)
         {
             return (from r in _rooms
                     let message = r.Messages.FirstOrDefault(m => m.Id == id)
@@ -210,6 +235,10 @@ namespace JabbR.Services
             user.Rooms.Remove(room);
 
             room.Users.Remove(user);
+        }
+
+        public void Reload(object entity)
+        {
         }
     }
 }
